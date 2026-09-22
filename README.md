@@ -4,9 +4,13 @@
 
 설치나 서버가 필요 없습니다. HTML 파일 하나를 브라우저로 열면 바로 쓸 수 있습니다.
 
+### ▶ [바로 실행하기](https://utaeu.github.io/html-visual-editor/)
+
+링크를 누르면 브라우저에서 바로 열립니다. 불러온 `index.html`은 브라우저 안에서만 읽히고 서버로 전송되지 않습니다.
+
 ## 빠른 시작
 
-1. `editor-standalone.html`을 더블클릭해 브라우저(Chrome 권장)로 엽니다.
+1. 위의 **바로 실행하기** 링크를 누릅니다. (오프라인에서는 `editor-standalone.html`을 더블클릭해 브라우저로 엽니다. Chrome 권장)
 2. **index.html 파일 열기** 버튼을 누르거나, 파일을 가운데 영역으로 드래그합니다.
 3. 미리보기에서 수정할 요소를 클릭하고, 오른쪽 패널에서 값을 바꿉니다.
 4. **내보내기(다운로드)** 를 누르면 `edited-index.html`로 저장됩니다.
@@ -55,7 +59,11 @@ editor.css               편집기 스타일
 editor.js                편집기 동작 로직
 editor-standalone.html   위 3개를 합친 단일 파일 (build.py로 생성)
 build.py                 단일 파일 생성 스크립트
+index.html               GitHub Pages 진입점 (편집기로 이동만 함)
+.nojekyll                GitHub Pages가 파일을 가공 없이 그대로 배포하도록 지정
 ```
+
+`main` 브랜치에 push하면 GitHub Pages 사이트가 자동으로 갱신됩니다.
 
 ## 개발
 
