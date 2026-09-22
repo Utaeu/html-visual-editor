@@ -1,0 +1,2 @@
+# 모든 컴퓨터에서 LF로 유지한다. (build.py --check 가 바이트 단위로 비교하기 때문)
+* text=auto eol=lf

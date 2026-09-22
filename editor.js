@@ -1,0 +1,1131 @@
+(() => {
+  const fileInput = document.getElementById('file-input');
+  const fileNameLabel = document.getElementById('file-name');
+  const dropzone = document.getElementById('dropzone');
+  const previewFrame = document.getElementById('preview-frame');
+  const selectionInfo = document.getElementById('selection-info');
+
+  let editorIdCounter = 0;
+
+  // 편집 도구 전용 표식. 내보내기 단계에서 모두 제거된다.
+  const HOVER_CLASS = '__editor-hover';
+  const SELECTED_CLASS = '__editor-selected';
+  const EDITOR_STYLE_ID = '__editor-injected-style';
+
+  let selectedElement = null;
+  let hoveredElement = null;
+  let originalFileName = '';
+  let mode = 'edit'; // 'edit' | 'view'
+  // 보기 모드 진입 시점의 문서 스냅샷. 페이지가 다른 문서로 이동해 버렸을 때
+  // 편집 내용을 되살리는 복구 지점으로 쓴다.
+  let lastGoodHtml = null;
+
+  function loadHtmlIntoPreview(htmlText) {
+    dropzone.hidden = true;
+    previewFrame.hidden = false;
+    previewFrame.srcdoc = htmlText;
+  }
+
+  function assignEditorIds(doc) {
+    const excludedTags = new Set(['SCRIPT', 'STYLE']);
+    const body = doc.body;
+    if (!body) return;
+
+    const walk = (node) => {
+      for (const child of Array.from(node.children)) {
+        if (!excludedTags.has(child.tagName)) {
+          if (!child.hasAttribute('data-editor-id')) {
+            editorIdCounter += 1;
+            child.setAttribute('data-editor-id', `el-${editorIdCounter}`);
+          }
+          walk(child);
+        }
+      }
+    };
+
+    walk(body);
+  }
+
+  // 하이라이트는 style 속성이 아닌 클래스로만 적용한다.
+  // 이 <style> 태그와 클래스는 내보내기 시 함께 제거된다.
+  function injectEditorStyles(doc) {
+    if (doc.getElementById(EDITOR_STYLE_ID)) return;
+    const style = doc.createElement('style');
+    style.id = EDITOR_STYLE_ID;
+    style.textContent = `
+      .${HOVER_CLASS} {
+        outline: 1px solid #3b82f6 !important;
+        outline-offset: -1px !important;
+        cursor: pointer !important;
+      }
+      .${SELECTED_CLASS} {
+        outline: 2px solid #ef4444 !important;
+        outline-offset: -1px !important;
+      }
+    `;
+    (doc.head || doc.documentElement).appendChild(style);
+  }
+
+  function isEditable(el) {
+    return !!(el && el.nodeType === 1 && el.hasAttribute('data-editor-id'));
+  }
+
+  function renderSelectionInfo(el) {
+    if (!el) {
+      selectionInfo.innerHTML = '<span class="selection-info__empty">선택된 요소 없음</span>';
+      return;
+    }
+    const tag = el.tagName.toLowerCase();
+    const id = el.getAttribute('data-editor-id');
+    selectionInfo.innerHTML =
+      '선택됨: <span class="selection-info__tag"></span> ' +
+      '<span class="selection-info__id"></span>';
+    selectionInfo.querySelector('.selection-info__tag').textContent = `<${tag}>`;
+    selectionInfo.querySelector('.selection-info__id').textContent = `#${id}`;
+  }
+
+  function setHovered(el) {
+    if (hoveredElement === el) return;
+    if (hoveredElement) hoveredElement.classList.remove(HOVER_CLASS);
+    hoveredElement = el;
+    // 선택된 요소에는 hover 하이라이트를 겹치지 않는다.
+    if (hoveredElement && hoveredElement !== selectedElement) {
+      hoveredElement.classList.add(HOVER_CLASS);
+    }
+  }
+
+  function selectElement(el) {
+    if (selectedElement === el) return;
+    if (selectedElement) selectedElement.classList.remove(SELECTED_CLASS);
+    selectedElement = el;
+
+    if (selectedElement) {
+      selectedElement.classList.remove(HOVER_CLASS);
+      selectedElement.classList.add(SELECTED_CLASS);
+    }
+
+    renderSelectionInfo(selectedElement);
+
+    window.dispatchEvent(new CustomEvent('elementSelected', {
+      detail: selectedElement
+        ? {
+            editorId: selectedElement.getAttribute('data-editor-id'),
+            tagName: selectedElement.tagName.toLowerCase(),
+            inlineStyle: selectedElement.getAttribute('style') || '',
+            element: selectedElement,
+            // 다음 단계의 속성 패널이 현재 값을 읽을 때 사용
+            computedStyle: previewFrame.contentWindow.getComputedStyle(selectedElement)
+          }
+        : null
+    }));
+  }
+
+  function attachSelectionHandlers(doc) {
+    doc.addEventListener('mouseover', (e) => {
+      if (mode !== 'edit') return;
+      setHovered(isEditable(e.target) ? e.target : null);
+    }, true);
+
+    doc.addEventListener('mouseout', (e) => {
+      if (e.target === hoveredElement) setHovered(null);
+    }, true);
+
+    // 미리보기 영역을 벗어나면 hover 해제
+    doc.addEventListener('mouseleave', () => setHovered(null), true);
+
+    // 선택은 mousedown에서 처리한다. iframe이 포커스를 얻기 전의 첫 클릭도
+    // 놓치지 않고, 반응도 더 즉각적이다.
+    doc.addEventListener('mousedown', (e) => {
+      if (mode !== 'edit') return;
+
+      e.preventDefault(); // 텍스트 드래그 선택 방지
+      e.stopPropagation();
+
+      if (isEditable(e.target)) {
+        selectElement(e.target);
+      } else if (e.target === doc.body || e.target === doc.documentElement) {
+        // 빈 공간을 누르면 선택 해제
+        selectElement(null);
+      }
+    }, true);
+
+    doc.addEventListener('click', (e) => {
+      // 편집 모드: 캡처 단계에서 가로채 원본 동작을 모두 막는다.
+      if (mode === 'edit') {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+
+      // 보기 모드: 페이지 스크립트는 그대로 돌리고, 문서 이동만 막는다.
+      //
+      // srcdoc 문서의 baseURI는 편집기 자신의 URL이다. 따라서 '#id' 같은
+      // 해시 링크조차 editor.html#id 로 resolve되어 편집기가 자기 iframe
+      // 안에 재귀 로드된다. 해시든 상대경로든 전부 막고, 해시는 같은 문서
+      // 안에서 스크롤로 흉내낸다.
+      const link = e.target.closest && e.target.closest('a[href]');
+      if (!link) return;
+
+      const href = link.getAttribute('href');
+      if (!href) return;
+
+      e.preventDefault();
+
+      if (href.startsWith('#')) {
+        const id = href.slice(1);
+        const target = id
+          ? (doc.getElementById(id) || doc.querySelector(`[name="${id}"]`))
+          : doc.body;
+        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return;
+      }
+
+      showToast('보기 모드에서는 다른 페이지로 이동할 수 없습니다.');
+    }, true);
+
+    // 폼 제출은 어느 모드에서도 문서를 갈아치우므로 항상 막는다.
+    doc.addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (mode === 'view') showToast('보기 모드에서는 폼 제출이 차단됩니다.');
+    }, true);
+
+    // 포커스가 iframe 안에 있어도 단축키가 동작하도록 전달한다.
+    doc.addEventListener('keydown', handleEditorKey);
+  }
+
+  previewFrame.addEventListener('load', () => {
+    let doc;
+    try {
+      doc = previewFrame.contentDocument;
+    } catch {
+      doc = null; // 다른 출처로 이동한 경우 접근이 차단된다.
+    }
+
+    if (!doc || !doc.body) {
+      showToast('미리보기 문서에 접근할 수 없습니다. 파일을 다시 열어주세요.');
+      return;
+    }
+
+    // srcdoc으로 넣은 문서는 location이 항상 about:srcdoc이다. 값이 다르면
+    // 페이지 스크립트 등이 미리보기를 다른 문서로 이동시킨 것이므로,
+    // 그 문서를 계측하지 않고(편집기 자신일 수도 있다) 직전 상태로 되돌린다.
+    if (doc.location.href !== 'about:srcdoc') {
+      if (lastGoodHtml) {
+        showToast('페이지가 다른 문서로 이동해 직전 상태로 복구했습니다.');
+        previewFrame.srcdoc = lastGoodHtml;
+      } else {
+        showToast('페이지가 다른 문서로 이동했습니다. 파일을 다시 열어주세요.');
+      }
+      return;
+    }
+
+    // 새 문서이므로 이전 선택 상태를 초기화한다.
+    selectedElement = null;
+    hoveredElement = null;
+    renderSelectionInfo(null);
+    syncPanel(null);
+
+    // 항상 편집 모드로 시작한다.
+    mode = 'edit';
+    applyModeUI();
+
+    assignEditorIds(doc);
+    injectEditorStyles(doc);
+    attachSelectionHandlers(doc);
+    resetHistory();
+    buildTree(doc);
+
+    document.getElementById('export-btn').disabled = false;
+    modeButtons.forEach((btn) => { btn.disabled = false; });
+  });
+
+  // 이후 단계(속성 패널·내보내기)에서 사용하는 공용 접근자
+  window.FrontEndEditor = {
+    getSelectedElement: () => selectedElement,
+    getPreviewDocument: () => previewFrame.contentDocument,
+    getPreviewWindow: () => previewFrame.contentWindow,
+    selectElement,
+    EDITOR_STYLE_ID,
+    HOVER_CLASS,
+    SELECTED_CLASS
+  };
+
+  function handleFile(file) {
+    if (!file) return;
+    if (!/\.html?$/i.test(file.name)) {
+      alert('HTML 파일(.html)만 열 수 있습니다.');
+      return;
+    }
+
+    editorIdCounter = 0;
+    originalFileName = file.name;
+    fileNameLabel.textContent = file.name;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      loadHtmlIntoPreview(e.target.result);
+    };
+    reader.onerror = () => {
+      alert('파일을 읽는 중 오류가 발생했습니다.');
+    };
+    reader.readAsText(file);
+  }
+
+  fileInput.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    handleFile(file);
+  });
+
+  ['dragenter', 'dragover'].forEach((eventName) => {
+    dropzone.addEventListener(eventName, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dropzone.classList.add('dropzone--active');
+    });
+  });
+
+  ['dragleave', 'drop'].forEach((eventName) => {
+    dropzone.addEventListener(eventName, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dropzone.classList.remove('dropzone--active');
+    });
+  });
+
+  dropzone.addEventListener('drop', (e) => {
+    const file = e.dataTransfer.files && e.dataTransfer.files[0];
+    handleFile(file);
+  });
+
+  /* ---------------------------------------------------------------
+   * 속성 편집 패널 (색상 / 위치·크기 / 형태)
+   * ------------------------------------------------------------- */
+
+  const placeholder = document.getElementById('sidebar-placeholder');
+  const stylePanel = document.getElementById('style-panel');
+  const offsetFields = document.getElementById('offset-fields');
+  const radiusOutput = document.getElementById('border-radius-out');
+
+  const ctrl = {
+    bgColor: document.getElementById('bg-color'),
+    textColor: document.getElementById('text-color'),
+    width: document.getElementById('width'),
+    height: document.getElementById('height'),
+    position: document.getElementById('position'),
+    top: document.getElementById('top'),
+    left: document.getElementById('left'),
+    fontSize: document.getElementById('font-size'),
+    fontFamily: document.getElementById('font-family'),
+    fontFamilyCustom: document.getElementById('font-family-custom'),
+    fontWeight: document.getElementById('font-weight'),
+    radius: document.getElementById('border-radius'),
+    borderWidth: document.getElementById('border-width'),
+    borderStyle: document.getElementById('border-style'),
+    borderColor: document.getElementById('border-color'),
+    boxShadow: document.getElementById('box-shadow')
+  };
+
+  const textContentInput = document.getElementById('text-content');
+  const textContentNotice = document.getElementById('text-content-notice');
+
+  // 텍스트를 담을 수 없는(대체/빈) 요소들. textContent를 넣어도 화면에
+  // 나타나지 않거나 직렬화 시 사라진다.
+  const VOID_LIKE_TAGS = new Set([
+    'IMG', 'BR', 'HR', 'INPUT', 'SOURCE', 'TRACK', 'EMBED', 'AREA', 'COL', 'WBR',
+    'IFRAME', 'CANVAS', 'VIDEO', 'AUDIO', 'OBJECT', 'SVG', 'PICTURE', 'META', 'LINK'
+  ]);
+
+  // 자식 요소가 있는 요소의 textContent를 덮어쓰면 하위 트리가 통째로
+  // 사라지므로(히스토리가 들고 있는 참조까지 무효화됨) 편집을 막는다.
+  function textEditState(el) {
+    if (!el) return { editable: false, reason: '' };
+    if (VOID_LIKE_TAGS.has(el.tagName)) {
+      return { editable: false, reason: `<${el.tagName.toLowerCase()}>는 텍스트를 담지 않는 요소입니다.` };
+    }
+    if (el.children.length > 0) {
+      return {
+        editable: false,
+        reason: '하위 요소가 있어 직접 편집할 수 없습니다. 트리나 화면에서 하위 요소를 선택하세요.'
+      };
+    }
+    return { editable: true, reason: '' };
+  }
+
+  function syncTextContent(el) {
+    const state = textEditState(el);
+    textContentInput.disabled = !state.editable;
+    textContentInput.value = state.editable ? el.textContent : '';
+    textContentNotice.hidden = state.editable;
+    textContentNotice.textContent = state.reason;
+  }
+
+  textContentInput.addEventListener('input', () => {
+    const el = selectedElement;
+    if (!el || !textEditState(el).editable) return;
+
+    const before = el.textContent;
+    el.textContent = textContentInput.value;
+    pushHistory(el, 'text', 'text', before, el.textContent);
+  });
+
+  const customFontField = document.getElementById('font-family-custom-field');
+  const alignButtons = Array.from(document.querySelectorAll('.btn-align'));
+
+  const SHADOW_PRESET = '0 2px 8px rgba(0, 0, 0, 0.2)';
+
+  function rgbToHex(value) {
+    if (!value) return null;
+    const m = value.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+)\s*)?\)$/);
+    if (!m) return null;
+    // 완전 투명한 색은 색상값으로 표현할 수 없다.
+    if (m[4] !== undefined && parseFloat(m[4]) === 0) return null;
+    const hex = (n) => Number(n).toString(16).padStart(2, '0');
+    return `#${hex(m[1])}${hex(m[2])}${hex(m[3])}`;
+  }
+
+  // 'Times New Roman', Times, serif  ↔  "times new roman",times,serif
+  // 처럼 표기만 다른 같은 글꼴 스택을 비교하기 위해 정규화한다.
+  function normalizeFontStack(value) {
+    return (value || '')
+      .toLowerCase()
+      .replace(/["']/g, '')
+      .split(',')
+      .map((s) => s.trim())
+      .join(',');
+  }
+
+  function normalizeFontWeight(value) {
+    if (value === 'normal') return '400';
+    if (value === 'bold') return '700';
+    return String(parseInt(value, 10) || 400);
+  }
+
+  // Chrome의 computed text-align 기본값은 'start'/'end'로 나온다.
+  function normalizeTextAlign(value) {
+    if (value === 'start') return 'left';
+    if (value === 'end') return 'right';
+    return value;
+  }
+
+  function pxToNumber(value) {
+    const n = parseFloat(value);
+    return Number.isFinite(n) ? Math.round(n) : '';
+  }
+
+  // 선택된 요소의 인라인 style을 우선 읽고, 없으면 computed style로 대체한다.
+  function readProp(el, prop) {
+    const inline = el.style.getPropertyValue(prop);
+    if (inline) return inline;
+    return previewFrame.contentWindow.getComputedStyle(el).getPropertyValue(prop);
+  }
+
+  // 색상은 인라인에 'teal'·'#fff' 등 어떤 표기로 적혀 있어도
+  // computed style이 항상 rgb()로 정규화해 주므로 그쪽에서 읽는다.
+  function readColor(el, prop) {
+    return previewFrame.contentWindow.getComputedStyle(el).getPropertyValue(prop);
+  }
+
+  // 히스토리에 기록하지 않는 원시 쓰기. 반드시 commit() 안에서만 호출한다.
+  function rawApply(prop, value) {
+    const el = selectedElement;
+    if (!el) return;
+    if (value === '' || value === null) {
+      el.style.removeProperty(prop);
+    } else {
+      el.style.setProperty(prop, value);
+    }
+  }
+
+  /* --- 되돌리기 / 다시하기 --------------------------------------- */
+
+  const undoBtn = document.getElementById('undo-btn');
+  const redoBtn = document.getElementById('redo-btn');
+
+  const history = [];
+  let historyIndex = -1; // 마지막으로 적용된 항목의 인덱스
+  let lastCommitTime = 0;
+  let isRestoring = false;
+
+  // 슬라이더 드래그처럼 연속으로 쏟아지는 변경은 한 항목으로 합친다.
+  const COALESCE_MS = 1000;
+
+  function updateHistoryButtons() {
+    undoBtn.disabled = historyIndex < 0;
+    redoBtn.disabled = historyIndex >= history.length - 1;
+  }
+
+  function resetHistory() {
+    history.length = 0;
+    historyIndex = -1;
+    lastCommitTime = 0;
+    updateHistoryButtons();
+  }
+
+  function pushHistory(el, key, type, before, after) {
+    if (before === after || isRestoring) return;
+
+    const now = Date.now();
+    const last = history[historyIndex];
+    const canCoalesce =
+      last &&
+      historyIndex === history.length - 1 &&
+      last.el === el &&
+      last.key === key &&
+      now - lastCommitTime < COALESCE_MS;
+
+    if (canCoalesce) {
+      last.after = after;
+    } else {
+      history.length = historyIndex + 1; // 되돌린 뒤 새로 편집하면 redo 이력은 폐기
+      history.push({ el, key, type, before, after });
+      historyIndex = history.length - 1;
+    }
+
+    lastCommitTime = now;
+    updateHistoryButtons();
+  }
+
+  // 복제·삭제처럼 DOM 구조를 바꾸는 동작. 값 비교나 병합 없이 항상 한 항목으로
+  // 남기고, 되돌릴 때 필요한 삽입 위치(부모 + 기준 형제)를 함께 들고 있는다.
+  function pushStructuralHistory(type, el, parent, nextSibling) {
+    if (isRestoring) return;
+    history.length = historyIndex + 1; // 되돌린 뒤 새로 편집하면 redo 이력은 폐기
+    history.push({ el, parent, nextSibling, type, key: null });
+    historyIndex = history.length - 1;
+    lastCommitTime = 0; // 뒤이은 스타일 편집이 이 항목에 합쳐지지 않도록
+    updateHistoryButtons();
+  }
+
+  // style 속성 전체를 스냅샷으로 남긴다. 한 동작이 여러 속성을 건드려도
+  // (예: 테두리 두께 + style 자동 승격) 되돌리기 한 번으로 복원된다.
+  function commit(key, fn) {
+    const el = selectedElement;
+    if (!el) return;
+
+    const before = el.getAttribute('style');
+    fn();
+    pushHistory(el, key, 'style', before, el.getAttribute('style'));
+  }
+
+  function applyProp(prop, value) {
+    commit(prop, () => rawApply(prop, value));
+  }
+
+  function restoreStyleAttr(el, value) {
+    if (value === null) el.removeAttribute('style');
+    else el.setAttribute('style', value);
+  }
+
+  function restoreEntry(entry, value) {
+    if (entry.type === 'text') entry.el.textContent = value;
+    else restoreStyleAttr(entry.el, value);
+  }
+
+  // 되돌린 지점을 사용자가 볼 수 있도록 해당 요소를 선택 상태로 만든다.
+  function focusHistoryTarget(el) {
+    if (!el) {
+      // 삭제를 다시 실행한 경우처럼 선택할 대상이 없는 상태
+      selectElement(null);
+      syncPanel(null);
+    } else if (el.isConnected) {
+      selectElement(el);
+      syncPanel(el); // 이미 선택돼 있던 경우 selectElement가 조기 반환하므로 명시 호출
+    } else {
+      // 보기 모드에서 페이지 스크립트가 지워버린 요소일 수 있다.
+      showToast('되돌린 요소가 현재 화면에 없습니다.');
+    }
+    lastCommitTime = 0; // 되돌린 직후의 편집이 이전 항목에 합쳐지지 않도록
+    updateHistoryButtons();
+  }
+
+  const STRUCTURAL_TYPES = new Set(['insert', 'remove']);
+
+  function reinsertNode(entry) {
+    const { el, parent, nextSibling } = entry;
+    if (!parent.isConnected) {
+      showToast('되돌릴 위치가 현재 화면에 없습니다.');
+      return;
+    }
+    // 기준 형제가 그사이 사라졌다면 부모의 맨 뒤에 붙인다.
+    if (nextSibling && nextSibling.parentNode === parent) {
+      parent.insertBefore(el, nextSibling);
+    } else {
+      parent.appendChild(el);
+    }
+  }
+
+  // 노드를 되살리거나(attach) 떼어낸 뒤, 이어서 선택할 대상을 돌려준다.
+  function applyStructural(entry, attach) {
+    if (attach) reinsertNode(entry);
+    else entry.el.remove();
+
+    const doc = previewFrame.contentDocument;
+    if (doc) buildTree(doc);
+
+    if (attach) return entry.el;
+    // 사라진 요소 대신 부모를 선택한다. 부모가 편집 대상이 아니면 선택 해제.
+    return entry.parent.isConnected && entry.parent.hasAttribute('data-editor-id')
+      ? entry.parent
+      : null;
+  }
+
+  function undo() {
+    if (historyIndex < 0) return;
+    const entry = history[historyIndex];
+    isRestoring = true;
+
+    let focus;
+    if (STRUCTURAL_TYPES.has(entry.type)) {
+      // 넣었던 것은 빼고, 지웠던 것은 되살린다.
+      focus = applyStructural(entry, entry.type === 'remove');
+    } else {
+      restoreEntry(entry, entry.before);
+      focus = entry.el;
+    }
+
+    isRestoring = false;
+    historyIndex -= 1;
+    focusHistoryTarget(focus);
+  }
+
+  function redo() {
+    if (historyIndex >= history.length - 1) return;
+    const entry = history[historyIndex + 1];
+    isRestoring = true;
+
+    let focus;
+    if (STRUCTURAL_TYPES.has(entry.type)) {
+      focus = applyStructural(entry, entry.type === 'insert');
+    } else {
+      restoreEntry(entry, entry.after);
+      focus = entry.el;
+    }
+
+    isRestoring = false;
+    historyIndex += 1;
+    focusHistoryTarget(focus);
+  }
+
+  undoBtn.addEventListener('click', undo);
+  redoBtn.addEventListener('click', redo);
+
+  // 글자를 입력하는 칸에서는 단축키를 가로채지 않는다.
+  // (브라우저 기본 되돌리기와 Delete 키의 글자 지우기를 그대로 둔다)
+  const TEXT_INPUT_TYPES = new Set(['text', 'number', 'search', 'email', 'url', 'tel', 'password']);
+
+  function isTextEntryTarget(t) {
+    if (!t || !t.tagName) return false;
+    if (t.isContentEditable) return true;
+    if (t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return true;
+    return t.tagName === 'INPUT' && TEXT_INPUT_TYPES.has(t.type);
+  }
+
+  function handleEditorKey(e) {
+    if (isTextEntryTarget(e.target)) return;
+
+    if (e.ctrlKey || e.metaKey) {
+      const key = e.key.toLowerCase();
+      if (key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+      } else if (key === 'y' || (key === 'z' && e.shiftKey)) {
+        e.preventDefault();
+        redo();
+      } else if (key === 'd') {
+        e.preventDefault();
+        duplicateSelected();
+      }
+      return;
+    }
+
+    if ((e.key === 'Delete' || e.key === 'Backspace') && selectedElement) {
+      e.preventDefault();
+      deleteSelected();
+    }
+  }
+
+  document.addEventListener('keydown', handleEditorKey);
+
+  /* --------------------------------------------------------------- */
+
+  // 두께나 색만 바꿔도 테두리가 보이도록 style이 none이면 solid로 올려준다.
+  function ensureBorderVisibleRaw() {
+    const el = selectedElement;
+    if (!el) return;
+    if (readProp(el, 'border-top-style') === 'none') {
+      rawApply('border-style', 'solid');
+      ctrl.borderStyle.value = 'solid';
+    }
+  }
+
+  function syncPanel(el) {
+    if (!el) {
+      stylePanel.hidden = true;
+      placeholder.hidden = false;
+      elementActions.hidden = true;
+      return;
+    }
+    placeholder.hidden = true;
+    stylePanel.hidden = false;
+    elementActions.hidden = false;
+
+    // 내용
+    syncTextContent(el);
+
+    // 색상
+    ctrl.bgColor.value = rgbToHex(readColor(el, 'background-color')) || '#ffffff';
+    ctrl.textColor.value = rgbToHex(readColor(el, 'color')) || '#000000';
+
+    // 텍스트
+    ctrl.fontSize.value = pxToNumber(readProp(el, 'font-size'));
+
+    const stack = readProp(el, 'font-family');
+    const normalized = normalizeFontStack(stack);
+    const match = Array.from(ctrl.fontFamily.options)
+      .find((opt) => opt.value !== '__custom' && normalizeFontStack(opt.value) === normalized);
+    if (match) {
+      ctrl.fontFamily.value = match.value;
+      customFontField.hidden = true;
+      ctrl.fontFamilyCustom.value = '';
+    } else {
+      // 목록에 없는 글꼴이면 '직접 입력'으로 두고 현재 스택을 그대로 보여준다.
+      ctrl.fontFamily.value = '__custom';
+      customFontField.hidden = false;
+      ctrl.fontFamilyCustom.value = stack;
+    }
+
+    ctrl.fontWeight.value = normalizeFontWeight(readProp(el, 'font-weight'));
+
+    const align = normalizeTextAlign(readProp(el, 'text-align'));
+    alignButtons.forEach((btn) => {
+      btn.classList.toggle('is-active', btn.dataset.align === align);
+    });
+
+    // 위치 / 크기 — 인라인으로 지정된 값이 있을 때만 숫자를 채우고,
+    // 지정되지 않았으면 placeholder("auto")를 유지해 의도치 않은 고정을 막는다.
+    ctrl.width.value = el.style.width ? pxToNumber(el.style.width) : '';
+    ctrl.height.value = el.style.height ? pxToNumber(el.style.height) : '';
+
+    const position = readProp(el, 'position') || 'static';
+    ctrl.position.value = ['static', 'relative', 'absolute'].includes(position) ? position : 'static';
+    offsetFields.hidden = ctrl.position.value === 'static';
+    ctrl.top.value = el.style.top ? pxToNumber(el.style.top) : '';
+    ctrl.left.value = el.style.left ? pxToNumber(el.style.left) : '';
+
+    // 여백 — 실제 적용 중인 간격을 보여주는 편이 유용하므로 computed 값을 채운다.
+    document.querySelectorAll('[data-spacing]').forEach((input) => {
+      input.value = pxToNumber(readProp(el, input.dataset.spacing));
+    });
+
+    // 형태
+    const radius = pxToNumber(readProp(el, 'border-top-left-radius')) || 0;
+    ctrl.radius.value = radius;
+    radiusOutput.textContent = `${radius}px`;
+
+    ctrl.borderWidth.value = pxToNumber(readProp(el, 'border-top-width'));
+    ctrl.borderStyle.value = readProp(el, 'border-top-style') || 'none';
+    ctrl.borderColor.value = rgbToHex(readColor(el, 'border-top-color')) || '#000000';
+    ctrl.boxShadow.checked = (readProp(el, 'box-shadow') || 'none') !== 'none';
+  }
+
+  // 색상
+  ctrl.bgColor.addEventListener('input', () => applyProp('background-color', ctrl.bgColor.value));
+  ctrl.textColor.addEventListener('input', () => applyProp('color', ctrl.textColor.value));
+
+  document.querySelectorAll('[data-reset]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      applyProp(btn.dataset.reset, '');
+      syncPanel(selectedElement);
+    });
+  });
+
+  // 텍스트
+  ctrl.fontSize.addEventListener('input', () => {
+    const v = ctrl.fontSize.value;
+    applyProp('font-size', v === '' ? '' : `${v}px`);
+  });
+
+  ctrl.fontFamily.addEventListener('change', () => {
+    if (ctrl.fontFamily.value === '__custom') {
+      customFontField.hidden = false;
+      ctrl.fontFamilyCustom.focus();
+      // 입력이 채워질 때까지는 글꼴을 바꾸지 않는다.
+      return;
+    }
+    customFontField.hidden = true;
+    applyProp('font-family', ctrl.fontFamily.value);
+  });
+
+  ctrl.fontFamilyCustom.addEventListener('input', () => {
+    applyProp('font-family', ctrl.fontFamilyCustom.value.trim());
+  });
+
+  ctrl.fontWeight.addEventListener('change', () => {
+    applyProp('font-weight', ctrl.fontWeight.value);
+  });
+
+  alignButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const align = btn.dataset.align;
+      const isActive = btn.classList.contains('is-active');
+      // 활성화된 버튼을 다시 누르면 정렬 지정을 해제한다.
+      applyProp('text-align', isActive ? '' : align);
+      syncPanel(selectedElement);
+    });
+  });
+
+  // 위치 / 크기
+  [['width', 'width'], ['height', 'height'], ['top', 'top'], ['left', 'left']].forEach(([key, prop]) => {
+    ctrl[key].addEventListener('input', () => {
+      const v = ctrl[key].value;
+      applyProp(prop, v === '' ? '' : `${v}px`);
+    });
+  });
+
+  ctrl.position.addEventListener('change', () => {
+    applyProp('position', ctrl.position.value);
+    offsetFields.hidden = ctrl.position.value === 'static';
+  });
+
+  // 형태
+  ctrl.radius.addEventListener('input', () => {
+    applyProp('border-radius', `${ctrl.radius.value}px`);
+    radiusOutput.textContent = `${ctrl.radius.value}px`;
+  });
+
+  // 두께·색 변경과 border-style 자동 승격을 한 항목으로 묶어 기록한다.
+  ctrl.borderWidth.addEventListener('input', () => {
+    const v = ctrl.borderWidth.value;
+    commit('border', () => {
+      rawApply('border-width', v === '' ? '' : `${v}px`);
+      if (v !== '' && Number(v) > 0) ensureBorderVisibleRaw();
+    });
+  });
+
+  ctrl.borderStyle.addEventListener('change', () => {
+    applyProp('border-style', ctrl.borderStyle.value);
+  });
+
+  ctrl.borderColor.addEventListener('input', () => {
+    commit('border', () => {
+      rawApply('border-color', ctrl.borderColor.value);
+      ensureBorderVisibleRaw();
+    });
+  });
+
+  // 여백 (margin / padding)
+  document.querySelectorAll('[data-spacing]').forEach((input) => {
+    input.addEventListener('input', () => {
+      const v = input.value;
+      applyProp(input.dataset.spacing, v === '' ? '' : `${v}px`);
+    });
+  });
+
+  ctrl.boxShadow.addEventListener('change', () => {
+    applyProp('box-shadow', ctrl.boxShadow.checked ? SHADOW_PRESET : 'none');
+  });
+
+  /* ---------------------------------------------------------------
+   * 요소 트리 뷰
+   * ------------------------------------------------------------- */
+
+  const treeEl = document.getElementById('tree');
+
+  function treeLabel(el) {
+    // 하이라이트용 클래스는 라벨에 노출하지 않는다.
+    const classes = Array.from(el.classList)
+      .filter((c) => c !== HOVER_CLASS && c !== SELECTED_CLASS);
+    let meta = '';
+    if (el.id) meta = `#${el.id}`;
+    else if (classes.length) meta = `.${classes[0]}`;
+    return { tag: `<${el.tagName.toLowerCase()}>`, meta };
+  }
+
+  function buildTree(doc) {
+    treeEl.textContent = '';
+    if (!doc.body) return;
+
+    const frag = document.createDocumentFragment();
+
+    const walk = (node, depth) => {
+      for (const child of Array.from(node.children)) {
+        if (!child.hasAttribute('data-editor-id')) continue;
+
+        const { tag, meta } = treeLabel(child);
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'tree-node';
+        btn.style.paddingLeft = `${6 + depth * 12}px`;
+        btn.dataset.editorId = child.getAttribute('data-editor-id');
+        btn.append(document.createTextNode(tag));
+        if (meta) {
+          const span = document.createElement('span');
+          span.className = 'tree-node__meta';
+          span.textContent = ` ${meta}`;
+          btn.appendChild(span);
+        }
+        frag.appendChild(btn);
+
+        walk(child, depth + 1);
+      }
+    };
+
+    walk(doc.body, 0);
+
+    if (!frag.childNodes.length) {
+      const p = document.createElement('p');
+      p.className = 'tree__empty';
+      p.textContent = '표시할 요소가 없습니다.';
+      frag.appendChild(p);
+    }
+
+    treeEl.appendChild(frag);
+  }
+
+  treeEl.addEventListener('click', (e) => {
+    const btn = e.target.closest('.tree-node');
+    if (!btn) return;
+    const doc = previewFrame.contentDocument;
+    if (!doc) return;
+    const el = doc.querySelector(`[data-editor-id="${btn.dataset.editorId}"]`);
+    if (!el) return;
+    // 보기 모드에서 트리를 눌렀다면 편집하려는 의도이므로 모드를 되돌린다.
+    setMode('edit');
+    selectElement(el);
+  });
+
+  function highlightTreeNode(el) {
+    const id = el ? el.getAttribute('data-editor-id') : null;
+    treeEl.querySelectorAll('.tree-node').forEach((btn) => {
+      const active = btn.dataset.editorId === id;
+      btn.classList.toggle('is-active', active);
+      if (active) btn.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
+  /* ---------------------------------------------------------------
+   * 요소 복제 / 삭제
+   * ------------------------------------------------------------- */
+
+  const elementActions = document.getElementById('element-actions');
+  const duplicateBtn = document.getElementById('duplicate-btn');
+  const deleteBtn = document.getElementById('delete-btn');
+
+  // 복사본에 도구 전용 표식이 따라붙으면 안 된다. 편집 ID는 비워 두면
+  // assignEditorIds가 새 번호를 채워 준다.
+  function clearEditorMarks(root) {
+    [root, ...root.querySelectorAll('*')].forEach((el) => {
+      el.removeAttribute('data-editor-id');
+      if (!el.classList) return;
+      el.classList.remove(HOVER_CLASS, SELECTED_CLASS);
+      // 하이라이트 클래스만 있던 요소에 class="" 가 남지 않도록 정리
+      if (el.classList.length === 0) el.removeAttribute('class');
+    });
+  }
+
+  function duplicateSelected() {
+    const el = selectedElement;
+    const doc = previewFrame.contentDocument;
+    if (mode !== 'edit' || !el || !doc) return;
+
+    const parent = el.parentNode;
+    if (!parent) return;
+
+    const clone = el.cloneNode(true);
+    clearEditorMarks(clone);
+
+    // 원본 바로 뒤에 넣는다. (기준 형제는 되돌리기에도 쓰인다)
+    const nextSibling = el.nextSibling;
+    parent.insertBefore(clone, nextSibling);
+
+    assignEditorIds(doc);
+    buildTree(doc);
+    pushStructuralHistory('insert', clone, parent, nextSibling);
+
+    // 바로 이어서 편집할 수 있도록 복사본을 선택 상태로 만든다.
+    selectElement(clone);
+
+    // id는 문서에서 유일해야 하므로 그대로 복사되면 CSS·스크립트가 엉킬 수 있다.
+    showToast(clone.id || clone.querySelector('[id]')
+      ? '복제했습니다. id도 함께 복사되어 중복될 수 있습니다.'
+      : '복제했습니다.');
+  }
+
+  function deleteSelected() {
+    const el = selectedElement;
+    const doc = previewFrame.contentDocument;
+    if (mode !== 'edit' || !el || !doc) return;
+
+    const parent = el.parentNode;
+    if (!parent) return;
+
+    const nextSibling = el.nextSibling;
+    const label = `<${el.tagName.toLowerCase()}>`;
+
+    // 선택·hover 표식을 먼저 걷어내야 되살렸을 때 테두리가 남지 않는다.
+    setHovered(null);
+    selectElement(null);
+    el.remove();
+
+    buildTree(doc);
+    pushStructuralHistory('remove', el, parent, nextSibling);
+
+    showToast(`${label} 요소를 삭제했습니다. Ctrl+Z로 되돌릴 수 있습니다.`);
+  }
+
+  duplicateBtn.addEventListener('click', duplicateSelected);
+  deleteBtn.addEventListener('click', deleteSelected);
+
+  /* ---------------------------------------------------------------
+   * 편집 모드 / 보기 모드
+   * ------------------------------------------------------------- */
+
+  const modeButtons = Array.from(document.querySelectorAll('.btn-mode'));
+  const modeBadge = document.getElementById('mode-badge');
+  const previewPane = document.getElementById('preview-pane');
+
+  function applyModeUI() {
+    modeButtons.forEach((btn) => {
+      btn.classList.toggle('is-active', btn.dataset.mode === mode);
+    });
+    previewPane.classList.toggle('is-view-mode', mode === 'view');
+    modeBadge.hidden = mode !== 'view';
+  }
+
+  function setMode(next) {
+    if (next === mode) return;
+    mode = next;
+    applyModeUI();
+
+    const doc = previewFrame.contentDocument;
+
+    if (mode === 'view') {
+      // 하이라이트와 선택을 걷어내 실제 화면처럼 보이게 한다.
+      setHovered(null);
+      selectElement(null);
+      // 페이지 스크립트가 문서를 이동시켜도 되돌아올 수 있도록 복구 지점을 남긴다.
+      if (doc && doc.documentElement) {
+        lastGoodHtml = `${serializeDoctype(doc)}\n${doc.documentElement.outerHTML}`;
+      }
+      return;
+    }
+
+    if (!doc || !doc.body) return;
+
+    // 보기 모드 동안 페이지 스크립트가 DOM을 바꿨을 수 있다.
+    // 새로 생긴 요소에도 편집 ID를 부여하고 트리를 다시 만든다.
+    injectEditorStyles(doc);
+    assignEditorIds(doc);
+    buildTree(doc);
+  }
+
+  modeButtons.forEach((btn) => {
+    btn.addEventListener('click', () => setMode(btn.dataset.mode));
+  });
+
+  /* ---------------------------------------------------------------
+   * 반응형 미리보기
+   * ------------------------------------------------------------- */
+
+  document.querySelectorAll('.btn-viewport').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const width = Number(btn.dataset.viewport);
+
+      document.querySelectorAll('.btn-viewport').forEach((b) => {
+        b.classList.toggle('is-active', b === btn);
+      });
+
+      if (width === 0) {
+        previewFrame.classList.remove('is-constrained');
+        previewFrame.style.width = '';
+      } else {
+        previewFrame.classList.add('is-constrained');
+        previewFrame.style.width = `${width}px`;
+      }
+    });
+  });
+
+  window.addEventListener('elementSelected', (e) => {
+    const el = e.detail ? e.detail.element : null;
+    syncPanel(el);
+    highlightTreeNode(el);
+  });
+
+  /* ---------------------------------------------------------------
+   * 내보내기 (수정된 index.html 다운로드)
+   * ------------------------------------------------------------- */
+
+  const exportBtn = document.getElementById('export-btn');
+  const toast = document.getElementById('toast');
+  let toastTimer = null;
+
+  function showToast(message) {
+    toast.textContent = message;
+    toast.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      toast.hidden = true;
+    }, 2600);
+  }
+
+  // 원본 문서의 DOCTYPE을 그대로 복원한다. (HTML5가 아닌 문서도 보존)
+  function serializeDoctype(doc) {
+    const dt = doc.doctype;
+    if (!dt) return '<!DOCTYPE html>';
+    let out = `<!DOCTYPE ${dt.name}`;
+    if (dt.publicId) out += ` PUBLIC "${dt.publicId}"`;
+    else if (dt.systemId) out += ' SYSTEM';
+    if (dt.systemId) out += ` "${dt.systemId}"`;
+    return `${out}>`;
+  }
+
+  // 편집 중인 실제 DOM은 건드리지 않고, 사본에서 도구 전용 표식만 제거한다.
+  function buildCleanHtml(doc) {
+    const root = doc.documentElement.cloneNode(true);
+
+    root.querySelectorAll('[data-editor-id]').forEach((el) => {
+      el.removeAttribute('data-editor-id');
+    });
+
+    root.querySelectorAll('[class]').forEach((el) => {
+      el.classList.remove(HOVER_CLASS, SELECTED_CLASS);
+      // 하이라이트 클래스만 있던 요소에 class="" 가 남지 않도록 정리
+      if (el.classList.length === 0) el.removeAttribute('class');
+    });
+
+    const injected = root.querySelector(`[id="${EDITOR_STYLE_ID}"]`);
+    if (injected) injected.remove();
+
+    return `${serializeDoctype(doc)}\n${root.outerHTML}\n`;
+  }
+
+  function exportFileName() {
+    const base = originalFileName || 'index.html';
+    return base.startsWith('edited-') ? base : `edited-${base}`;
+  }
+
+  exportBtn.addEventListener('click', () => {
+    const doc = previewFrame.contentDocument;
+    if (!doc || !doc.documentElement) {
+      showToast('내보낼 문서가 없습니다.');
+      return;
+    }
+
+    const html = buildCleanHtml(doc);
+    const name = exportFileName();
+    const url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
+
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    showToast(`내보내기 완료: ${name}`);
+  });
+
+  // 검증용으로 직렬화 결과만 얻을 수 있게 노출
+  window.FrontEndEditor.buildCleanHtml = () => buildCleanHtml(previewFrame.contentDocument);
+})();
