@@ -22,7 +22,8 @@ HTML Visual Editor: `index.html` 파일을 불러와 텍스트·색상·레이�
 
 ## editor.js 구조 (IIFE 하나)
 
-- 미리보기: `<iframe id="preview-frame">`에 `srcdoc`로 불러온 HTML을 넣는다. 외부 리소스(상대 경로 CSS·이미지)는 불러오지 않는다.
+- 미리보기: `<iframe id="preview-frame">`에 `srcdoc`로 불러온 HTML을 넣는다. srcdoc 문서의 baseURI는 편집기 URL이라 상대 경로가 풀리지 않는다.
+- 폴더 열기(`handleFolder` → `openProjectPage`): 폴더 파일을 `project.files`(폴더 기준 경로 → File)로 들고, HTML을 DOMParser로 파싱해 `rewriteDocRefs()`로 link/script/img/srcset/style url() 등을 blob URL로 바꾼 뒤 srcdoc에 넣는다. CSS 파일은 안쪽 url()/@import도 CSS 위치 기준으로 변환(`assetBlob`). `<a href>` 페이지 링크는 건드리지 않는다. 내보낼 때 `restoreAssetRefs()`가 `project.reverse`(blob URL → 원래 표기)로 문자열을 되돌린다. 파일 하나만 열면 `project`는 null이고 상대 경로 개수만 세어 안내 토스트를 띄운다.
 - 편집 표식: 요소마다 `data-editor-id="el-N"`, 하이라이트는 클래스 `__editor-hover` / `__editor-selected`, 주입 스타일은 `#__editor-injected-style`. 하이라이트는 style 속성이 아니라 **클래스로만** 적용한다(내보내기 결과 오염 방지).
 - 내보내기: `buildCleanHtml()`이 문서를 복제해 위 표식을 모두 제거하고 doctype을 붙여 `edited-<원본이름>`으로 다운로드한다.
 - 스타일 편집은 인라인 style로 저장된다. `applyProp()` → `commit(key, fn)`이 style 속성 전체를 before/after 스냅샷으로 기록한다.
@@ -31,8 +32,12 @@ HTML Visual Editor: `index.html` 파일을 불러와 텍스트·색상·레이�
 - 선택 모델: `selectedElements` 배열이 기준이고, 모든 선택 변경은 `setSelection(list)`을 거친다(`selectElement(el)`은 한 개짜리 래퍼, `toggleInSelection`은 Ctrl+클릭). 한 개일 때만 `selectedElement`가 채워져 단일 편집 패널이 뜨고, 두 개 이상이면 `selectedElement`는 null이고 `#batch-panel`(일괄 글자 크기)이 뜬다. 선택 표시는 모두 `__editor-selected` 클래스를 공유한다.
 - 드래그 범위 선택: 미리보기 문서의 mousedown/mousemove/mouseup으로 처리하고, 사각형(`#drag-box`)은 미리보기가 아니라 편집기 문서에 `position: fixed`로 그린다. 직접 텍스트 노드를 가진 요소만 대상.
 - 일괄 편집 되돌리기: `pushBatchHistory()`가 `{ type: 'batch', key, items: [{ el, before, after }] }` 한 항목으로 기록한다. 글자 크기는 모든 요소의 computed 값을 먼저 읽은 뒤 쓴다(부모·자식 동시 선택 시 이중 적용 방지).
-- 하위 요소가 있는 요소는 텍스트 직접 편집 불가(하위 구조 보호).
+- 하위 요소가 있는 요소는 텍스트 직접 편집 불가(하위 구조 보호). 예외: 자식이 `<br>`뿐인 요소.
+- 내용 편집의 줄바꿈: `readEditableText()`/`writeEditableText()`가 입력칸의 `
+` ↔ `<br>`을 변환한다(`pre` 계열 white-space 요소는 `
+` 그대로). 소스 들여쓰기에서 온 줄바꿈·공백은 읽을 때 공백 하나로 정리한다. 'text' 히스토리 항목은 `innerHTML` 스냅샷이다. `<br>`/`<wbr>`에는 편집 ID를 붙이지 않아 트리·선택 대상에서 빠진다.
 - 텍스트 입력 칸에 포커스가 있으면 단축키(`Ctrl+Z/Y/D`, `Delete`)를 무시한다(`isTextEntryTarget`).
+- 요소 트리 접기: `#tree-pane.is-collapsed`(기본 접힘). 상태는 `localStorage['html-visual-editor:tree-collapsed']`에 저장하며, 접근이 막혀도 동작하도록 try/catch로 감싼다.
 - `window.FrontEndEditor`: 선택 요소·미리보기 문서 접근자와 `buildCleanHtml` 등을 노출한다(검증용).
 
 ## 확인 방법

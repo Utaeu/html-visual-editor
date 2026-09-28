@@ -12,7 +12,11 @@
     <div class="toolbar__actions">
       <label class="btn btn--primary" for="file-input">index.html 파일 열기</label>
       <input id="file-input" type="file" accept=".html,text/html" hidden />
+      <label class="btn btn--secondary" for="folder-input"
+             title="CSS·이미지·스크립트가 들어 있는 프로젝트 폴더를 통째로 엽니다">폴더 열기</label>
+      <input id="folder-input" type="file" webkitdirectory multiple hidden />
       <span id="file-name" class="file-name"></span>
+      <select id="page-select" class="page-select" title="폴더 안의 다른 페이지 열기" hidden></select>
 
       <div class="mode-group" id="mode-group">
         <button type="button" class="btn-mode is-active" data-mode="edit" disabled>편집 모드</button>
@@ -38,8 +42,14 @@
   </header>
 
   <main class="workspace">
-    <nav class="tree-pane" id="tree-pane">
-      <h2 class="tree-pane__title">요소 트리</h2>
+    <nav class="tree-pane is-collapsed" id="tree-pane">
+      <div class="tree-pane__head">
+        <h2 class="tree-pane__title">요소 트리</h2>
+        <button type="button" class="tree-toggle" id="tree-toggle" aria-expanded="false" title="요소 트리 펼치기">
+          <span class="tree-toggle__icon" aria-hidden="true">»</span>
+          <span class="tree-toggle__label">요소 트리</span>
+        </button>
+      </div>
       <div class="tree" id="tree">
         <p class="tree__empty">파일을 열면 요소 트리가 표시됩니다.</p>
       </div>
@@ -47,7 +57,8 @@
 
     <section class="preview-pane" id="preview-pane">
       <div class="dropzone" id="dropzone">
-        <p class="dropzone__text">여기로 index.html을 드래그하거나<br />위의 버튼을 눌러 파일을 열어주세요</p>
+        <p class="dropzone__text">여기로 index.html 또는 프로젝트 폴더를 드래그하거나<br />위의 버튼을 눌러 열어주세요</p>
+        <p class="dropzone__hint">CSS·이미지·스크립트 파일이 따로 있다면 <strong>폴더 열기</strong>로 열어야 화면이 제대로 보입니다.</p>
       </div>
       <iframe id="preview-frame" class="preview-frame" hidden title="미리보기"></iframe>
       <div class="mode-badge" id="mode-badge" hidden>
@@ -96,6 +107,11 @@
       <div class="panel" id="style-panel" hidden>
         <section class="panel__group">
           <h3 class="panel__heading">내용</h3>
+          <div class="content-tools">
+            <button type="button" class="btn-tool" id="line-break-btn"
+                    title="커서 위치에서 줄을 바꿉니다 (Enter 키와 같음)">↵ 줄바꿈</button>
+            <span class="content-tools__hint">Enter 키로도 줄을 바꿀 수 있습니다</span>
+          </div>
           <textarea id="text-content" class="content-textarea" rows="3"
                     placeholder="텍스트를 입력하세요"></textarea>
           <p class="field__hint" id="text-content-notice" hidden></p>

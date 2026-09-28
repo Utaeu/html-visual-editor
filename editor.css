@@ -24,6 +24,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 16px;
   padding: 12px 20px;
   background: #1f2430;
   color: #fff;
@@ -34,12 +35,22 @@ body {
   font-size: 16px;
   font-weight: 600;
   margin: 0;
+  white-space: nowrap;
 }
 
+/* 버튼이 많아 폭이 모자라면 글자를 접지 말고 줄 단위로 넘긴다. */
 .toolbar__actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
-  gap: 10px;
+  gap: 8px 10px;
+  min-width: 0;
+}
+
+.toolbar button,
+.toolbar .btn {
+  white-space: nowrap;
 }
 
 .btn {
@@ -59,6 +70,26 @@ body {
 
 .btn--primary:hover {
   background: #2563eb;
+}
+
+.btn--secondary {
+  background: #2a3140;
+  border: 1px solid #3a414f;
+  color: #e2e8f0;
+}
+
+.btn--secondary:hover {
+  background: #343c4d;
+}
+
+.page-select {
+  max-width: 200px;
+  padding: 5px 6px;
+  border: 1px solid #3a414f;
+  border-radius: 5px;
+  background: #2a3140;
+  color: #e2e8f0;
+  font-size: 12px;
 }
 
 .mode-group,
@@ -235,6 +266,10 @@ body {
 }
 
 .file-name {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 13px;
   color: #cbd5e1;
 }
@@ -254,13 +289,83 @@ body {
   overflow: auto;
 }
 
+.tree-pane__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
 .tree-pane__title {
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: #8a90a0;
-  margin: 0 0 10px;
+  margin: 0;
+}
+
+.tree-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 7px;
+  font-size: 13px;
+  border: 1px solid #d7dbe3;
+  border-radius: 4px;
+  background: #fff;
+  color: #6b7280;
+  cursor: pointer;
+}
+
+.tree-toggle:hover {
+  background: #f4f5f7;
+  color: #1f2430;
+}
+
+.tree-toggle__label {
+  display: none;
+}
+
+/* 접힌 상태: 좁은 세로 띠만 남기고, 띠 전체를 펼치기 버튼으로 쓴다. */
+.tree-pane.is-collapsed {
+  width: 34px;
+  padding: 0;
+  overflow: hidden;
+}
+
+.tree-pane.is-collapsed .tree-pane__head {
+  height: 100%;
+  margin: 0;
+}
+
+.tree-pane.is-collapsed .tree-pane__title,
+.tree-pane.is-collapsed .tree {
+  display: none;
+}
+
+.tree-pane.is-collapsed .tree-toggle {
+  flex-direction: column;
+  justify-content: flex-start;
+  width: 100%;
+  height: 100%;
+  padding: 14px 0;
+  gap: 10px;
+  border: none;
+  border-radius: 0;
+  background: #fff;
+}
+
+.tree-pane.is-collapsed .tree-toggle:hover {
+  background: #f4f5f7;
+}
+
+.tree-pane.is-collapsed .tree-toggle__label {
+  display: block;
+  writing-mode: vertical-rl;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
 }
 
 .tree__empty {
@@ -321,6 +426,7 @@ body {
   border: 2px dashed #c3c9d4;
   border-radius: 12px;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   background: #fff;
@@ -337,6 +443,13 @@ body {
   color: #6b7280;
   font-size: 14px;
   line-height: 1.6;
+}
+
+.dropzone__hint {
+  margin-top: 10px;
+  text-align: center;
+  color: #9aa1b1;
+  font-size: 12px;
 }
 
 .preview-frame {
@@ -508,6 +621,39 @@ body {
 
 .field input[type="range"] {
   width: 96px;
+}
+
+.content-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.content-tools__hint {
+  font-size: 11px;
+  color: #8a90a0;
+}
+
+.btn-tool {
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid #d7dbe3;
+  border-radius: 4px;
+  background: #fff;
+  color: #374151;
+  cursor: pointer;
+}
+
+.btn-tool:hover:not(:disabled) {
+  background: #f4f5f7;
+  border-color: #b9bfc9;
+}
+
+.btn-tool:disabled {
+  color: #b5bac4;
+  cursor: not-allowed;
 }
 
 .content-textarea {

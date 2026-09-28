@@ -31,7 +31,8 @@
   }
 
   function assignEditorIds(doc) {
-    const excludedTags = new Set(['SCRIPT', 'STYLE']);
+    // <br>은 '내용' 입력칸의 줄바꿈으로 다루므로 따로 선택·트리 대상이 되지 않게 한다.
+    const excludedTags = new Set(['SCRIPT', 'STYLE', 'BR', 'WBR']);
     const body = doc.body;
     if (!body) return;
 
@@ -390,30 +391,358 @@
     SELECTED_CLASS
   };
 
-  function handleFile(file) {
+  /* ---------------------------------------------------------------
+   * 외부 리소스 (CSS·JS·이미지)
+   *
+   * 미리보기는 srcdoc 문서라 상대 경로(assets/style.css, img/a.jpg)가
+   * 편집기 기준으로 풀려 아무것도 불러오지 못한다. 폴더를 통째로 열면
+   * 폴더 안 파일을 blob URL로 만들어 경로를 바꿔 끼우고, 내보낼 때
+   * 원래 경로로 되돌린다.
+   * ------------------------------------------------------------- */
+
+  const pageSelect = document.getElementById('page-select');
+
+  // 폴더로 열었을 때의 상태. 파일 하나만 열었다면 null.
+  let project = null;
+
+  const HTML_FILE_RE = /\.html?$/i;
+
+  // 경로 대신 파일을 가리켜야 하는 속성들. <a href> 같은 페이지 이동 링크는 제외한다.
+  const URL_ATTRS = [
+    ['script[src]', 'src'], ['img[src]', 'src'], ['source[src]', 'src'],
+    ['video[src]', 'src'], ['video[poster]', 'poster'], ['audio[src]', 'src'],
+    ['track[src]', 'src'], ['embed[src]', 'src'], ['object[data]', 'data'],
+    ['input[type="image"][src]', 'src'], ['image[href]', 'href'], ['use[href]', 'href']
+  ];
+  const LINK_REL_RE = /\b(stylesheet|icon|preload|modulepreload)\b/i;
+  const CSS_URL_RE = /url\(\s*(['"]?)([^'")]+?)\1\s*\)|@import\s+(['"])([^'"]+)\3/g;
+
+  // 폴더 안 파일을 가리키는 상대 경로인지. (http:, data:, #id, //cdn 등은 제외)
+  function isRelativeRef(raw) {
+    const v = (raw || '').trim();
+    return v !== '' && !v.startsWith('#') && !v.startsWith('//') &&
+      !/^[a-z][a-z0-9+.-]*:/i.test(v);
+  }
+
+  function dirOf(path) {
+    const i = path.lastIndexOf('/');
+    return i < 0 ? '' : path.slice(0, i + 1);
+  }
+
+  // 기준 폴더 + 상대 경로 → 폴더 안 경로 ('../', './', '/' 처리)
+  function resolvePath(baseDir, ref) {
+    let clean = ref.trim().split(/[?#]/)[0];
+    try { clean = decodeURIComponent(clean); } catch { /* 잘못된 % 표기는 그대로 둔다 */ }
+    const parts = clean.startsWith('/') ? [] : baseDir.split('/').filter(Boolean);
+    clean.split('/').forEach((seg) => {
+      if (seg === '' || seg === '.') return;
+      if (seg === '..') parts.pop();
+      else parts.push(seg);
+    });
+    return parts.join('/');
+  }
+
+  // 대소문자만 다른 경로도 찾아 준다. (Windows에서는 구분하지 않으므로)
+  function findFile(path) {
+    return project.files.get(path) || project.lowerFiles.get(path.toLowerCase()) || null;
+  }
+
+  const MIME_BY_EXT = { css: 'text/css', js: 'text/javascript', mjs: 'text/javascript', svg: 'image/svg+xml' };
+
+  // CSS 안의 url()·@import를 비동기 변환기로 바꿔 끼운다.
+  async function replaceCssRefs(text, convert) {
+    const matches = Array.from(text.matchAll(CSS_URL_RE));
+    if (!matches.length) return text;
+    let out = '';
+    let last = 0;
+    for (const m of matches) {
+      const isImport = m[4] !== undefined;
+      const raw = isImport ? m[4] : m[2];
+      const next = await convert(raw);
+      out += text.slice(last, m.index);
+      out += next ? m[0].replace(raw, next) : m[0];
+      last = m.index + m[0].length;
+    }
+    return out + text.slice(last);
+  }
+
+  // 폴더 안 파일 → Blob. CSS는 안쪽의 상대 경로까지 (CSS 파일 위치 기준으로) 바꾼다.
+  function assetBlob(path, stack = new Set()) {
+    if (stack.has(path)) return Promise.resolve(null); // @import 순환 방지
+    if (project.blobCache.has(path)) return project.blobCache.get(path);
+
+    const job = (async () => {
+      const file = findFile(path);
+      if (!file) {
+        project.missing.add(path);
+        return null;
+      }
+      const ext = path.split('.').pop().toLowerCase();
+      if (ext !== 'css') {
+        return MIME_BY_EXT[ext] ? new Blob([file], { type: MIME_BY_EXT[ext] }) : file;
+      }
+      const inner = new Set(stack).add(path);
+      const css = await replaceCssRefs(await file.text(), async (raw) => {
+        if (!isRelativeRef(raw)) return null;
+        const blob = await assetBlob(resolvePath(dirOf(path), raw), inner);
+        return blob ? trackUrl(blob) : null;
+      });
+      return new Blob([css], { type: 'text/css' });
+    })();
+
+    project.blobCache.set(path, job);
+    return job;
+  }
+
+  function trackUrl(blob) {
+    const url = URL.createObjectURL(blob);
+    project.urls.push(url);
+    return url;
+  }
+
+  // HTML에 적힌 경로 한 개 → blob URL. 내보낼 때 원래 표기로 되돌리기 위해
+  // 표기마다 URL을 따로 만들고 역방향 표를 남긴다.
+  async function htmlRefToUrl(baseDir, raw) {
+    if (!isRelativeRef(raw)) return null;
+    if (project.rawCache.has(raw)) return project.rawCache.get(raw);
+
+    const hashAt = raw.indexOf('#');
+    const beforeHash = hashAt < 0 ? raw : raw.slice(0, hashAt);
+    const hash = hashAt < 0 ? '' : raw.slice(hashAt);
+
+    const blob = await assetBlob(resolvePath(baseDir, raw));
+    if (!blob) return null;
+    const url = trackUrl(blob);
+    project.reverse.set(url, beforeHash);
+    project.rawCache.set(raw, url + hash);
+    return url + hash;
+  }
+
+  // 문서 안의 모든 외부 경로를 convert(raw) 결과로 바꾼다. (null이면 그대로)
+  async function rewriteDocRefs(doc, convert) {
+    const tasks = [];
+    const setAttr = (el, name) => {
+      tasks.push(convert(el.getAttribute(name)).then((v) => { if (v) el.setAttribute(name, v); }));
+    };
+
+    doc.querySelectorAll('link[href]').forEach((el) => {
+      if (LINK_REL_RE.test(el.getAttribute('rel') || '')) setAttr(el, 'href');
+    });
+    URL_ATTRS.forEach(([selector, name]) => {
+      doc.querySelectorAll(selector).forEach((el) => setAttr(el, name));
+    });
+    doc.querySelectorAll('img[srcset], source[srcset]').forEach((el) => {
+      const entries = el.getAttribute('srcset').split(',').map((s) => s.trim()).filter(Boolean);
+      tasks.push(Promise.all(entries.map(async (entry) => {
+        const [raw, ...desc] = entry.split(/\s+/);
+        const v = await convert(raw);
+        return [v || raw, ...desc].join(' ');
+      })).then((list) => el.setAttribute('srcset', list.join(', '))));
+    });
+    doc.querySelectorAll('[style*="url("]').forEach((el) => {
+      tasks.push(replaceCssRefs(el.getAttribute('style'), convert)
+        .then((v) => el.setAttribute('style', v)));
+    });
+    doc.querySelectorAll('style').forEach((el) => {
+      tasks.push(replaceCssRefs(el.textContent, convert).then((v) => { el.textContent = v; }));
+    });
+
+    await Promise.all(tasks);
+  }
+
+  function serializeParsed(doc) {
+    return `${serializeDoctype(doc)}\n${doc.documentElement.outerHTML}`;
+  }
+
+  // 내보내기 직전: blob URL을 원래 적혀 있던 경로로 되돌린다.
+  function restoreAssetRefs(html) {
+    if (!project) return html;
+    let out = html;
+    project.reverse.forEach((raw, url) => {
+      out = out.split(url).join(raw);
+    });
+    return out;
+  }
+
+  function releaseProject() {
+    if (project) project.urls.forEach((url) => URL.revokeObjectURL(url));
+    project = null;
+    pageSelect.hidden = true;
+    pageSelect.textContent = '';
+  }
+
+  function startDocument(name, html) {
+    editorIdCounter = 0;
+    originalFileName = name;
+    loadHtmlIntoPreview(html);
+  }
+
+  // 파일 하나만 연 경우: 예전처럼 그대로 띄우되, 불러오지 못할 외부 파일이
+  // 있으면 폴더로 열라고 알려 준다.
+  async function handleFile(file) {
     if (!file) return;
-    if (!/\.html?$/i.test(file.name)) {
+    if (!HTML_FILE_RE.test(file.name)) {
       alert('HTML 파일(.html)만 열 수 있습니다.');
       return;
     }
 
-    editorIdCounter = 0;
-    originalFileName = file.name;
-    fileNameLabel.textContent = file.name;
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      loadHtmlIntoPreview(e.target.result);
-    };
-    reader.onerror = () => {
+    let text;
+    try {
+      text = await file.text();
+    } catch {
       alert('파일을 읽는 중 오류가 발생했습니다.');
+      return;
+    }
+
+    releaseProject();
+    fileNameLabel.textContent = file.name;
+    startDocument(file.name, text);
+
+    const refs = new Set();
+    const probe = new DOMParser().parseFromString(text, 'text/html');
+    await rewriteDocRefs(probe, async (raw) => {
+      if (isRelativeRef(raw)) refs.add(raw);
+      return null;
+    });
+    if (refs.size) {
+      showToast(`외부 파일 ${refs.size}개(CSS·이미지 등)는 파일만 열어서는 보이지 않습니다. ` +
+        '‘폴더 열기’로 프로젝트 폴더를 열어주세요.', 6000);
+    }
+  }
+
+  // 폴더를 연 경우. entries: [{ path: '폴더 기준 경로', file }]
+  function handleFolder(entries, folderName) {
+    const htmlPaths = entries.map((e) => e.path).filter((p) => HTML_FILE_RE.test(p)).sort();
+    if (!htmlPaths.length) {
+      alert('폴더 안에 HTML 파일이 없습니다.');
+      return;
+    }
+
+    releaseProject();
+    project = {
+      name: folderName,
+      files: new Map(entries.map((e) => [e.path, e.file])),
+      lowerFiles: new Map(entries.map((e) => [e.path.toLowerCase(), e.file])),
+      urls: [],
+      blobCache: new Map(),
+      rawCache: new Map(),
+      reverse: new Map(),
+      missing: new Set(),
+      currentPage: null
     };
-    reader.readAsText(file);
+
+    htmlPaths.forEach((p) => pageSelect.add(new Option(p, p)));
+    pageSelect.hidden = htmlPaths.length < 2;
+
+    // index.html이 있으면 그것부터, 없으면 가장 얕은 위치의 첫 페이지
+    const start = htmlPaths.find((p) => /^index\.html?$/i.test(p)) ||
+      htmlPaths.slice().sort((a, b) => a.split('/').length - b.split('/').length)[0];
+    openProjectPage(start);
+  }
+
+  async function openProjectPage(path) {
+    const file = findFile(path);
+    if (!file) return;
+
+    project.currentPage = path;
+    pageSelect.value = path;
+    const name = path.split('/').pop();
+    fileNameLabel.textContent = project.name ? `${project.name}/${path}` : path;
+
+    project.missing.clear();
+    const doc = new DOMParser().parseFromString(await file.text(), 'text/html');
+    await rewriteDocRefs(doc, (raw) => htmlRefToUrl(dirOf(path), raw));
+    startDocument(name, serializeParsed(doc));
+
+    if (project.missing.size) {
+      showToast(`폴더에서 찾지 못한 파일 ${project.missing.size}개: ` +
+        Array.from(project.missing).slice(0, 3).join(', ') +
+        (project.missing.size > 3 ? ' …' : ''), 6000);
+    }
+  }
+
+  pageSelect.addEventListener('change', () => {
+    const next = pageSelect.value;
+    // 페이지를 바꾸면 편집 중인 문서가 사라지므로 수정 내용이 있으면 확인한다.
+    if (historyIndex >= 0 &&
+        !confirm('내보내지 않은 수정 내용이 사라집니다. 다른 페이지를 열까요?')) {
+      pageSelect.value = project.currentPage;
+      return;
+    }
+    openProjectPage(next);
+  });
+
+  // <input webkitdirectory>: webkitRelativePath가 '폴더이름/하위/파일' 형태다.
+  function entriesFromFileList(files) {
+    const list = Array.from(files);
+    const root = (list[0].webkitRelativePath || '').split('/')[0];
+    return {
+      folderName: root,
+      entries: list.map((file) => ({
+        path: file.webkitRelativePath
+          ? file.webkitRelativePath.split('/').slice(1).join('/')
+          : file.name,
+        file
+      }))
+    };
+  }
+
+  // 드래그한 폴더를 끝까지 훑어 파일 목록을 만든다.
+  async function readDroppedEntry(entry, prefix, out) {
+    if (entry.isFile) {
+      const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+      out.push({ path: prefix + entry.name, file });
+      return;
+    }
+    const reader = entry.createReader();
+    // readEntries는 한 번에 일부만 돌려주므로 빈 배열이 나올 때까지 반복한다.
+    for (;;) {
+      const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+      if (!batch.length) break;
+      for (const child of batch) {
+        await readDroppedEntry(child, `${prefix}${entry.name}/`, out);
+      }
+    }
+  }
+
+  async function handleDrop(dataTransfer) {
+    const items = Array.from(dataTransfer.items || [])
+      .map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null))
+      .filter(Boolean);
+
+    const dir = items.length === 1 && items[0].isDirectory ? items[0] : null;
+    if (dir) {
+      const entries = [];
+      await readDroppedEntry(dir, '', entries);
+      // readDroppedEntry는 '폴더이름/...'으로 쌓으므로 맨 앞 폴더 이름을 떼어 낸다.
+      handleFolder(entries.map((e) => ({ ...e, path: e.path.slice(dir.name.length + 1) })), dir.name);
+      return;
+    }
+
+    const files = Array.from(dataTransfer.files || []);
+    if (files.length > 1) {
+      // 여러 파일을 한꺼번에 놓았다면 같은 폴더에 있던 것으로 본다.
+      handleFolder(files.map((file) => ({ path: file.name, file })), '');
+    } else {
+      handleFile(files[0]);
+    }
   }
 
   fileInput.addEventListener('change', (e) => {
     const file = e.target.files && e.target.files[0];
     handleFile(file);
+    fileInput.value = ''; // 같은 파일을 다시 골라도 change가 일어나도록
+  });
+
+  // 검증용: [{ path, file }] 목록으로 폴더 열기를 흉내낼 수 있게 노출
+  window.FrontEndEditor.openFolder = handleFolder;
+
+  const folderInput = document.getElementById('folder-input');
+  folderInput.addEventListener('change', () => {
+    if (!folderInput.files || !folderInput.files.length) return;
+    const { entries, folderName } = entriesFromFileList(folderInput.files);
+    handleFolder(entries, folderName);
+    folderInput.value = '';
   });
 
   ['dragenter', 'dragover'].forEach((eventName) => {
@@ -433,8 +762,7 @@
   });
 
   dropzone.addEventListener('drop', (e) => {
-    const file = e.dataTransfer.files && e.dataTransfer.files[0];
-    handleFile(file);
+    handleDrop(e.dataTransfer);
   });
 
   /* ---------------------------------------------------------------
@@ -467,6 +795,7 @@
 
   const textContentInput = document.getElementById('text-content');
   const textContentNotice = document.getElementById('text-content-notice');
+  const lineBreakBtn = document.getElementById('line-break-btn');
 
   // 텍스트를 담을 수 없는(대체/빈) 요소들. textContent를 넣어도 화면에
   // 나타나지 않거나 직렬화 시 사라진다.
@@ -475,14 +804,15 @@
     'IFRAME', 'CANVAS', 'VIDEO', 'AUDIO', 'OBJECT', 'SVG', 'PICTURE', 'META', 'LINK'
   ]);
 
-  // 자식 요소가 있는 요소의 textContent를 덮어쓰면 하위 트리가 통째로
+  // 자식 요소가 있는 요소의 내용을 덮어쓰면 하위 트리가 통째로
   // 사라지므로(히스토리가 들고 있는 참조까지 무효화됨) 편집을 막는다.
+  // 단, 줄바꿈 <br>만 있는 경우는 편집기가 직접 만들고 다루므로 허용한다.
   function textEditState(el) {
     if (!el) return { editable: false, reason: '' };
     if (VOID_LIKE_TAGS.has(el.tagName)) {
       return { editable: false, reason: `<${el.tagName.toLowerCase()}>는 텍스트를 담지 않는 요소입니다.` };
     }
-    if (el.children.length > 0) {
+    if (Array.from(el.children).some((child) => child.tagName !== 'BR')) {
       return {
         editable: false,
         reason: '하위 요소가 있어 직접 편집할 수 없습니다. 트리나 화면에서 하위 요소를 선택하세요.'
@@ -491,21 +821,75 @@
     return { editable: true, reason: '' };
   }
 
+  // <pre>나 white-space: pre-* 요소는 줄바꿈 문자가 그대로 화면에 보이므로
+  // <br> 대신 줄바꿈 문자를 쓴다.
+  function preservesNewlines(el) {
+    const cs = previewFrame.contentWindow.getComputedStyle(el);
+    return /^(pre|break-spaces)/.test(cs.whiteSpace) ||
+      cs.whiteSpaceCollapse === 'preserve' || cs.whiteSpaceCollapse === 'preserve-breaks';
+  }
+
+  const BR_MARK = '\u0000'; // 공백 정리 중 <br> 자리를 지키기 위한 임시 표식
+
+  // 요소 내용 → 입력칸 문자열. <br>은 줄바꿈(\n)으로 바꾼다.
+  // 소스 코드 들여쓰기에서 온 줄바꿈·공백은 화면에서 공백 하나로 보이므로 그렇게 맞춘다.
+  function readEditableText(el) {
+    const keep = preservesNewlines(el);
+    let out = '';
+    el.childNodes.forEach((n) => {
+      if (n.nodeType === Node.TEXT_NODE) out += n.nodeValue;
+      else if (n.nodeName === 'BR') out += keep ? '\n' : BR_MARK;
+    });
+    if (keep) return out;
+    return out
+      .replace(/^\s*\n\s*/, '')
+      .replace(/\s*\n\s*$/, '')
+      .replace(/\s*\n\s*/g, ' ')
+      .split(BR_MARK).join('\n');
+  }
+
+  // 입력칸 문자열 → 요소 내용. 줄바꿈(\n)은 <br>로 넣는다.
+  function writeEditableText(el, value) {
+    if (preservesNewlines(el)) {
+      el.textContent = value;
+      return;
+    }
+    const doc = el.ownerDocument;
+    el.textContent = '';
+    value.split('\n').forEach((part, i) => {
+      if (i > 0) el.appendChild(doc.createElement('br'));
+      if (part) el.appendChild(doc.createTextNode(part));
+    });
+  }
+
   function syncTextContent(el) {
     const state = textEditState(el);
     textContentInput.disabled = !state.editable;
-    textContentInput.value = state.editable ? el.textContent : '';
+    lineBreakBtn.disabled = !state.editable;
+    textContentInput.value = state.editable ? readEditableText(el) : '';
     textContentNotice.hidden = state.editable;
     textContentNotice.textContent = state.reason;
   }
 
+  // 내용이 텍스트와 <br>뿐이므로 innerHTML 스냅샷으로 되돌리기를 기록한다.
   textContentInput.addEventListener('input', () => {
     const el = selectedElement;
     if (!el || !textEditState(el).editable) return;
 
-    const before = el.textContent;
-    el.textContent = textContentInput.value;
-    pushHistory(el, 'text', 'text', before, el.textContent);
+    const before = el.innerHTML;
+    writeEditableText(el, textContentInput.value);
+    pushHistory(el, 'text', 'text', before, el.innerHTML);
+  });
+
+  // 줄바꿈 버튼: 입력칸의 커서 위치(선택 영역이면 그 자리)에 줄바꿈을 넣는다.
+  // 버튼을 눌러도 입력칸 포커스·커서가 유지되도록 한다.
+  lineBreakBtn.addEventListener('mousedown', (e) => e.preventDefault());
+
+  lineBreakBtn.addEventListener('click', () => {
+    if (textContentInput.disabled) return;
+    textContentInput.focus();
+    textContentInput.setRangeText('\n', textContentInput.selectionStart, textContentInput.selectionEnd, 'end');
+    textContentInput.dispatchEvent(new Event('input', { bubbles: true }));
   });
 
   const customFontField = document.getElementById('font-family-custom-field');
@@ -687,7 +1071,7 @@
   }
 
   function restoreEntry(entry, value) {
-    if (entry.type === 'text') entry.el.textContent = value;
+    if (entry.type === 'text') entry.el.innerHTML = value;
     else restoreStyleAttr(entry.el, value);
   }
 
@@ -1100,6 +1484,40 @@
 
   const treeEl = document.getElementById('tree');
 
+  /* --- 트리 접기 / 펼치기 ---------------------------------------- */
+
+  const treePane = document.getElementById('tree-pane');
+  const treeToggle = document.getElementById('tree-toggle');
+  const TREE_COLLAPSED_KEY = 'html-visual-editor:tree-collapsed';
+
+  function setTreeCollapsed(collapsed) {
+    treePane.classList.toggle('is-collapsed', collapsed);
+    treeToggle.setAttribute('aria-expanded', String(!collapsed));
+    treeToggle.title = collapsed ? '요소 트리 펼치기' : '요소 트리 접기';
+    treeToggle.querySelector('.tree-toggle__icon').textContent = collapsed ? '»' : '«';
+    // 펼칠 때 선택된 요소가 보이도록 트리 위치를 맞춘다.
+    if (!collapsed) {
+      const active = treeEl.querySelector('.tree-node.is-active');
+      if (active) active.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  // 자주 쓰지 않는 패널이라 기본은 접힘. 마지막 상태는 브라우저에 기억한다.
+  // (사생활 보호 모드 등에서 저장소 접근이 막혀도 기본값으로 동작)
+  let treeCollapsed = true;
+  try {
+    treeCollapsed = localStorage.getItem(TREE_COLLAPSED_KEY) !== 'false';
+  } catch { /* 기본값 유지 */ }
+  setTreeCollapsed(treeCollapsed);
+
+  treeToggle.addEventListener('click', () => {
+    treeCollapsed = !treeCollapsed;
+    setTreeCollapsed(treeCollapsed);
+    try {
+      localStorage.setItem(TREE_COLLAPSED_KEY, String(treeCollapsed));
+    } catch { /* 저장 못 해도 이번 화면에서는 동작 */ }
+  });
+
   function treeLabel(el) {
     // 하이라이트용 클래스는 라벨에 노출하지 않는다.
     const classes = Array.from(el.classList)
@@ -1343,13 +1761,13 @@
   const toast = document.getElementById('toast');
   let toastTimer = null;
 
-  function showToast(message) {
+  function showToast(message, duration = 2600) {
     toast.textContent = message;
     toast.hidden = false;
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => {
       toast.hidden = true;
-    }, 2600);
+    }, duration);
   }
 
   // 원본 문서의 DOCTYPE을 그대로 복원한다. (HTML5가 아닌 문서도 보존)
@@ -1380,7 +1798,8 @@
     const injected = root.querySelector(`[id="${EDITOR_STYLE_ID}"]`);
     if (injected) injected.remove();
 
-    return `${serializeDoctype(doc)}\n${root.outerHTML}\n`;
+    // 폴더로 열었다면 blob URL로 바꿔 둔 경로를 원래 표기로 되돌린다.
+    return restoreAssetRefs(`${serializeDoctype(doc)}\n${root.outerHTML}\n`);
   }
 
   function exportFileName() {
