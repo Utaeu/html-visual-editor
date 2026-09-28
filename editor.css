@@ -106,6 +106,41 @@ body {
   color: #fff;
 }
 
+.btn-multi {
+  padding: 6px 12px;
+  margin-right: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid #3a414f;
+  border-radius: 5px;
+  background: #2a3140;
+  color: #cbd5e1;
+  cursor: pointer;
+}
+
+.btn-multi:hover:not(:disabled) {
+  background: #343c4d;
+}
+
+.btn-multi:disabled {
+  color: #5a6373;
+  cursor: not-allowed;
+}
+
+.btn-multi[aria-pressed="true"] {
+  background: #f59e0b;
+  border-color: #f59e0b;
+  color: #1f2430;
+}
+
+.drag-box {
+  position: fixed;
+  z-index: 50;
+  border: 1px dashed #3b82f6;
+  background: rgba(59, 130, 246, 0.12);
+  pointer-events: none;
+}
+
 .mode-badge {
   position: absolute;
   top: 28px;
@@ -572,6 +607,27 @@ body {
   background: #fff;
   color: #6b7280;
   cursor: pointer;
+}
+
+.btn-step {
+  width: 30px;
+  height: 26px;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid #d7dbe3;
+  border-radius: 4px;
+  background: #fff;
+  color: #374151;
+  cursor: pointer;
+}
+
+.btn-step:hover {
+  background: #f4f5f7;
+}
+
+#batch-font-size {
+  width: 76px;
 }
 
 .btn-reset:hover {

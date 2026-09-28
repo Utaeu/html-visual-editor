@@ -19,6 +19,9 @@
         <button type="button" class="btn-mode" data-mode="view" disabled>보기 모드</button>
       </div>
 
+      <button type="button" class="btn-multi" id="multi-select-btn" aria-pressed="false" disabled
+              title="켜면 클릭할 때마다 요소를 선택 목록에 더하거나 뺍니다 (Ctrl+클릭과 같음)">복수 선택</button>
+
       <div class="viewport-group" id="viewport-group">
         <button type="button" class="btn-viewport is-active" data-viewport="0">데스크톱</button>
         <button type="button" class="btn-viewport" data-viewport="768">태블릿</button>
@@ -64,7 +67,31 @@
                 title="선택한 요소를 삭제합니다 (Delete)">삭제</button>
       </div>
 
-      <p class="sidebar__placeholder" id="sidebar-placeholder">요소를 선택하면 이곳에 편집 옵션이 표시됩니다.</p>
+      <p class="sidebar__placeholder" id="sidebar-placeholder">
+        요소를 선택하면 이곳에 편집 옵션이 표시됩니다.<br />
+        Ctrl+클릭하거나 화면을 드래그해 범위를 지정하면 여러 요소를 한 번에 선택할 수 있습니다.
+      </p>
+
+      <div class="panel" id="batch-panel" hidden>
+        <section class="panel__group">
+          <h3 class="panel__heading">일괄 편집</h3>
+          <div class="field">
+            <label class="field__label" for="batch-font-size">글자 크기</label>
+            <div class="field__control">
+              <button type="button" class="btn-step" data-font-step="-1" title="각 요소를 1px씩 줄입니다">−1</button>
+              <input type="number" id="batch-font-size" min="1" step="1" placeholder="여러 값" />
+              <span class="field__unit">px</span>
+              <button type="button" class="btn-step" data-font-step="1" title="각 요소를 1px씩 키웁니다">+1</button>
+            </div>
+          </div>
+          <p class="field__hint" id="batch-font-summary"></p>
+          <p class="field__hint">
+            −1 / +1은 요소마다 현재 크기에서 1px씩 바꿉니다.
+            숫자를 직접 입력하면 모든 요소가 같은 크기가 됩니다.
+          </p>
+        </section>
+        <button type="button" class="btn-action" id="clear-selection-btn" title="선택을 모두 해제합니다 (Esc)">선택 해제</button>
+      </div>
 
       <div class="panel" id="style-panel" hidden>
         <section class="panel__group">
@@ -267,6 +294,8 @@
   </main>
 
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <!-- 드래그 범위 선택 사각형. 미리보기 문서를 건드리지 않도록 편집기 쪽에 그린다. -->
+  <div class="drag-box" id="drag-box" hidden></div>
 
   <script src="editor.js"></script>
 </body>

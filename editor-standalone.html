@@ -113,6 +113,41 @@ body {
   color: #fff;
 }
 
+.btn-multi {
+  padding: 6px 12px;
+  margin-right: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid #3a414f;
+  border-radius: 5px;
+  background: #2a3140;
+  color: #cbd5e1;
+  cursor: pointer;
+}
+
+.btn-multi:hover:not(:disabled) {
+  background: #343c4d;
+}
+
+.btn-multi:disabled {
+  color: #5a6373;
+  cursor: not-allowed;
+}
+
+.btn-multi[aria-pressed="true"] {
+  background: #f59e0b;
+  border-color: #f59e0b;
+  color: #1f2430;
+}
+
+.drag-box {
+  position: fixed;
+  z-index: 50;
+  border: 1px dashed #3b82f6;
+  background: rgba(59, 130, 246, 0.12);
+  pointer-events: none;
+}
+
 .mode-badge {
   position: absolute;
   top: 28px;
@@ -581,6 +616,27 @@ body {
   cursor: pointer;
 }
 
+.btn-step {
+  width: 30px;
+  height: 26px;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid #d7dbe3;
+  border-radius: 4px;
+  background: #fff;
+  color: #374151;
+  cursor: pointer;
+}
+
+.btn-step:hover {
+  background: #f4f5f7;
+}
+
+#batch-font-size {
+  width: 76px;
+}
+
 .btn-reset:hover {
   background: #f4f5f7;
   color: #1f2430;
@@ -599,6 +655,9 @@ body {
         <button type="button" class="btn-mode is-active" data-mode="edit" disabled>편집 모드</button>
         <button type="button" class="btn-mode" data-mode="view" disabled>보기 모드</button>
       </div>
+
+      <button type="button" class="btn-multi" id="multi-select-btn" aria-pressed="false" disabled
+              title="켜면 클릭할 때마다 요소를 선택 목록에 더하거나 뺍니다 (Ctrl+클릭과 같음)">복수 선택</button>
 
       <div class="viewport-group" id="viewport-group">
         <button type="button" class="btn-viewport is-active" data-viewport="0">데스크톱</button>
@@ -645,7 +704,31 @@ body {
                 title="선택한 요소를 삭제합니다 (Delete)">삭제</button>
       </div>
 
-      <p class="sidebar__placeholder" id="sidebar-placeholder">요소를 선택하면 이곳에 편집 옵션이 표시됩니다.</p>
+      <p class="sidebar__placeholder" id="sidebar-placeholder">
+        요소를 선택하면 이곳에 편집 옵션이 표시됩니다.<br />
+        Ctrl+클릭하거나 화면을 드래그해 범위를 지정하면 여러 요소를 한 번에 선택할 수 있습니다.
+      </p>
+
+      <div class="panel" id="batch-panel" hidden>
+        <section class="panel__group">
+          <h3 class="panel__heading">일괄 편집</h3>
+          <div class="field">
+            <label class="field__label" for="batch-font-size">글자 크기</label>
+            <div class="field__control">
+              <button type="button" class="btn-step" data-font-step="-1" title="각 요소를 1px씩 줄입니다">−1</button>
+              <input type="number" id="batch-font-size" min="1" step="1" placeholder="여러 값" />
+              <span class="field__unit">px</span>
+              <button type="button" class="btn-step" data-font-step="1" title="각 요소를 1px씩 키웁니다">+1</button>
+            </div>
+          </div>
+          <p class="field__hint" id="batch-font-summary"></p>
+          <p class="field__hint">
+            −1 / +1은 요소마다 현재 크기에서 1px씩 바꿉니다.
+            숫자를 직접 입력하면 모든 요소가 같은 크기가 됩니다.
+          </p>
+        </section>
+        <button type="button" class="btn-action" id="clear-selection-btn" title="선택을 모두 해제합니다 (Esc)">선택 해제</button>
+      </div>
 
       <div class="panel" id="style-panel" hidden>
         <section class="panel__group">
@@ -848,6 +931,8 @@ body {
   </main>
 
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <!-- 드래그 범위 선택 사각형. 미리보기 문서를 건드리지 않도록 편집기 쪽에 그린다. -->
+  <div class="drag-box" id="drag-box" hidden></div>
 
   <script>
 (() => {
@@ -864,8 +949,12 @@ body {
   const SELECTED_CLASS = '__editor-selected';
   const EDITOR_STYLE_ID = '__editor-injected-style';
 
+  // 선택 목록. 한 개일 때만 selectedElement에 담아 단일 편집 패널을 쓰고,
+  // 두 개 이상이면 selectedElement는 null로 두고 일괄 편집 패널을 쓴다.
+  let selectedElements = [];
   let selectedElement = null;
   let hoveredElement = null;
+  let multiSelectMode = false; // 툴바 '복수 선택' 토글. 켜면 클릭이 Ctrl+클릭처럼 동작한다.
   let originalFileName = '';
   let mode = 'edit'; // 'edit' | 'view'
   // 보기 모드 진입 시점의 문서 스냅샷. 페이지가 다른 문서로 이동해 버렸을 때
@@ -923,6 +1012,10 @@ body {
   }
 
   function renderSelectionInfo(el) {
+    if (selectedElements.length > 1) {
+      selectionInfo.textContent = `선택됨: ${selectedElements.length}개 요소`;
+      return;
+    }
     if (!el) {
       selectionInfo.innerHTML = '<span class="selection-info__empty">선택된 요소 없음</span>';
       return;
@@ -941,20 +1034,28 @@ body {
     if (hoveredElement) hoveredElement.classList.remove(HOVER_CLASS);
     hoveredElement = el;
     // 선택된 요소에는 hover 하이라이트를 겹치지 않는다.
-    if (hoveredElement && hoveredElement !== selectedElement) {
+    if (hoveredElement && !selectedElements.includes(hoveredElement)) {
       hoveredElement.classList.add(HOVER_CLASS);
     }
   }
 
-  function selectElement(el) {
-    if (selectedElement === el) return;
-    if (selectedElement) selectedElement.classList.remove(SELECTED_CLASS);
-    selectedElement = el;
+  function sameSelection(list) {
+    return list.length === selectedElements.length &&
+      list.every((el, i) => el === selectedElements[i]);
+  }
 
-    if (selectedElement) {
-      selectedElement.classList.remove(HOVER_CLASS);
-      selectedElement.classList.add(SELECTED_CLASS);
-    }
+  // 선택 목록 전체를 교체한다. 단일 선택도 모두 이 함수를 거친다.
+  function setSelection(list) {
+    const next = Array.from(new Set(list)).filter(isEditable);
+    if (sameSelection(next)) return;
+
+    selectedElements.forEach((el) => el.classList.remove(SELECTED_CLASS));
+    selectedElements = next;
+    selectedElement = next.length === 1 ? next[0] : null;
+    selectedElements.forEach((el) => {
+      el.classList.remove(HOVER_CLASS);
+      el.classList.add(SELECTED_CLASS);
+    });
 
     renderSelectionInfo(selectedElement);
 
@@ -972,9 +1073,116 @@ body {
     }));
   }
 
+  function selectElement(el) {
+    setSelection(el ? [el] : []);
+  }
+
+  // Ctrl+클릭: 선택 목록에 있으면 빼고, 없으면 더한다.
+  function toggleInSelection(el) {
+    setSelection(selectedElements.includes(el)
+      ? selectedElements.filter((s) => s !== el)
+      : [...selectedElements, el]);
+  }
+
+  /* --- 드래그 범위 선택 ------------------------------------------ */
+
+  const dragBox = document.getElementById('drag-box');
+  const DRAG_THRESHOLD = 5; // 이보다 적게 움직이면 클릭으로 본다.
+  let drag = null;
+
+  // 직접 품은 글자가 있는 요소만 범위 선택 대상으로 삼는다.
+  // (감싸는 레이아웃용 div까지 잡히면 글자 크기 일괄 변경이 의도와 달라진다)
+  function hasOwnText(el) {
+    return Array.from(el.childNodes).some(
+      (n) => n.nodeType === Node.TEXT_NODE && n.textContent.trim() !== ''
+    );
+  }
+
+  // 시작점은 문서 좌표로 저장해 드래그 중 스크롤해도 범위가 어긋나지 않게 한다.
+  function dragRectInClient(win) {
+    const x1 = drag.startX - win.scrollX;
+    const y1 = drag.startY - win.scrollY;
+    return {
+      left: Math.min(x1, drag.curX),
+      top: Math.min(y1, drag.curY),
+      right: Math.max(x1, drag.curX),
+      bottom: Math.max(y1, drag.curY)
+    };
+  }
+
+  function drawDragBox(rect) {
+    const frameRect = previewFrame.getBoundingClientRect();
+    const ox = frameRect.left + previewFrame.clientLeft;
+    const oy = frameRect.top + previewFrame.clientTop;
+    dragBox.style.left = `${ox + rect.left}px`;
+    dragBox.style.top = `${oy + rect.top}px`;
+    dragBox.style.width = `${rect.right - rect.left}px`;
+    dragBox.style.height = `${rect.bottom - rect.top}px`;
+    dragBox.hidden = false;
+  }
+
+  function elementsInRect(doc, rect) {
+    return Array.from(doc.body.querySelectorAll('[data-editor-id]')).filter((el) => {
+      if (!hasOwnText(el)) return false;
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) return false;
+      return r.left < rect.right && r.right > rect.left &&
+        r.top < rect.bottom && r.bottom > rect.top;
+    });
+  }
+
+  function beginDrag(e, additive) {
+    const win = e.view;
+    drag = {
+      doc: e.target.ownerDocument,
+      startX: e.clientX + win.scrollX,
+      startY: e.clientY + win.scrollY,
+      curX: e.clientX,
+      curY: e.clientY,
+      additive,
+      base: selectedElements.slice(), // 추가 선택일 때 이어 붙일 기존 목록
+      active: false
+    };
+  }
+
+  function updateDrag(e) {
+    if (!drag) return;
+    // 버튼을 뗀 사실을 놓쳤다면(미리보기 밖에서 뗀 경우 등) 그대로 끝낸다.
+    if (e.buttons === 0) {
+      endDrag(false);
+      return;
+    }
+    drag.curX = e.clientX;
+    drag.curY = e.clientY;
+    const rect = dragRectInClient(e.view);
+    if (!drag.active) {
+      if (rect.right - rect.left < DRAG_THRESHOLD && rect.bottom - rect.top < DRAG_THRESHOLD) return;
+      drag.active = true;
+      setHovered(null);
+    }
+    drawDragBox(rect);
+  }
+
+  function endDrag(apply) {
+    if (!drag) return;
+    const { doc, active, additive, base } = drag;
+    const rect = active && apply ? dragRectInClient(doc.defaultView) : null;
+    drag = null;
+    dragBox.hidden = true;
+    if (!rect) return;
+
+    const hits = elementsInRect(doc, rect);
+    if (!hits.length) {
+      showToast('범위 안에 글자가 있는 요소가 없습니다.');
+      if (!additive) selectElement(null);
+      return;
+    }
+    setSelection(additive ? [...base, ...hits] : hits);
+  }
+
   function attachSelectionHandlers(doc) {
     doc.addEventListener('mouseover', (e) => {
-      if (mode !== 'edit') return;
+      if (mode !== 'edit' || drag) return;
       setHovered(isEditable(e.target) ? e.target : null);
     }, true);
 
@@ -993,13 +1201,21 @@ body {
       e.preventDefault(); // 텍스트 드래그 선택 방지
       e.stopPropagation();
 
+      // Ctrl(맥은 Cmd)·Shift+클릭 또는 복수 선택 모드에서는 목록에 더하거나 뺀다.
+      const additive = e.ctrlKey || e.metaKey || e.shiftKey || multiSelectMode;
+      if (e.button === 0) beginDrag(e, additive);
+
       if (isEditable(e.target)) {
-        selectElement(e.target);
-      } else if (e.target === doc.body || e.target === doc.documentElement) {
+        if (additive) toggleInSelection(e.target);
+        else selectElement(e.target);
+      } else if (!additive && (e.target === doc.body || e.target === doc.documentElement)) {
         // 빈 공간을 누르면 선택 해제
         selectElement(null);
       }
     }, true);
+
+    doc.addEventListener('mousemove', updateDrag, true);
+    doc.addEventListener('mouseup', () => endDrag(true), true);
 
     doc.addEventListener('click', (e) => {
       // 편집 모드: 캡처 단계에서 가로채 원본 동작을 모두 막는다.
@@ -1072,8 +1288,11 @@ body {
     }
 
     // 새 문서이므로 이전 선택 상태를 초기화한다.
+    selectedElements = [];
     selectedElement = null;
     hoveredElement = null;
+    drag = null;
+    dragBox.hidden = true;
     renderSelectionInfo(null);
     syncPanel(null);
 
@@ -1089,11 +1308,17 @@ body {
 
     document.getElementById('export-btn').disabled = false;
     modeButtons.forEach((btn) => { btn.disabled = false; });
+    multiSelectBtn.disabled = false;
   });
+
+  // 미리보기 밖에서 버튼을 떼더라도 드래그를 마무리한다.
+  window.addEventListener('mouseup', () => endDrag(true));
 
   // 이후 단계(속성 패널·내보내기)에서 사용하는 공용 접근자
   window.FrontEndEditor = {
     getSelectedElement: () => selectedElement,
+    getSelectedElements: () => selectedElements.slice(),
+    setSelection,
     getPreviewDocument: () => previewFrame.contentDocument,
     getPreviewWindow: () => previewFrame.contentWindow,
     selectElement,
@@ -1337,6 +1562,36 @@ body {
     updateHistoryButtons();
   }
 
+  // 여러 요소의 style을 한 번에 바꾼 동작. 요소별 before/after를 묶어
+  // 되돌리기 한 번으로 모두 복원한다. 같은 대상·같은 key의 연속 변경은 합친다.
+  function pushBatchHistory(key, items) {
+    if (isRestoring) return;
+    const changed = items.filter((it) => it.before !== it.after);
+    if (!changed.length) return;
+
+    const now = Date.now();
+    const last = history[historyIndex];
+    const canCoalesce =
+      last &&
+      last.type === 'batch' &&
+      historyIndex === history.length - 1 &&
+      last.key === key &&
+      last.items.length === items.length &&
+      last.items.every((it, i) => it.el === items[i].el) &&
+      now - lastCommitTime < COALESCE_MS;
+
+    if (canCoalesce) {
+      last.items.forEach((it, i) => { it.after = items[i].after; });
+    } else {
+      history.length = historyIndex + 1; // 되돌린 뒤 새로 편집하면 redo 이력은 폐기
+      history.push({ type: 'batch', key, items });
+      historyIndex = history.length - 1;
+    }
+
+    lastCommitTime = now;
+    updateHistoryButtons();
+  }
+
   // 복제·삭제처럼 DOM 구조를 바꾸는 동작. 값 비교나 병합 없이 항상 한 항목으로
   // 남기고, 되돌릴 때 필요한 삽입 위치(부모 + 기준 형제)를 함께 들고 있는다.
   function pushStructuralHistory(type, el, parent, nextSibling) {
@@ -1373,9 +1628,22 @@ body {
     else restoreStyleAttr(entry.el, value);
   }
 
+  // 일괄 편집 항목을 before/after 중 한쪽으로 돌리고, 다시 선택할 요소들을 돌려준다.
+  function restoreBatch(entry, side) {
+    entry.items.forEach((it) => restoreStyleAttr(it.el, it[side]));
+    return entry.items.map((it) => it.el);
+  }
+
   // 되돌린 지점을 사용자가 볼 수 있도록 해당 요소를 선택 상태로 만든다.
   function focusHistoryTarget(el) {
-    if (!el) {
+    if (Array.isArray(el)) {
+      // 일괄 편집: 화면에 남아 있는 요소들만 다시 선택한다.
+      const alive = el.filter((e) => e.isConnected);
+      if (alive.length < el.length) showToast('되돌린 요소 중 일부가 현재 화면에 없습니다.');
+      setSelection(alive);
+      syncPanel(selectedElement); // 선택이 그대로라 setSelection이 조기 반환한 경우 대비
+      highlightTreeNode();
+    } else if (!el) {
       // 삭제를 다시 실행한 경우처럼 선택할 대상이 없는 상태
       selectElement(null);
       syncPanel(null);
@@ -1430,6 +1698,8 @@ body {
     if (STRUCTURAL_TYPES.has(entry.type)) {
       // 넣었던 것은 빼고, 지웠던 것은 되살린다.
       focus = applyStructural(entry, entry.type === 'remove');
+    } else if (entry.type === 'batch') {
+      focus = restoreBatch(entry, 'before');
     } else {
       restoreEntry(entry, entry.before);
       focus = entry.el;
@@ -1448,6 +1718,8 @@ body {
     let focus;
     if (STRUCTURAL_TYPES.has(entry.type)) {
       focus = applyStructural(entry, entry.type === 'insert');
+    } else if (entry.type === 'batch') {
+      focus = restoreBatch(entry, 'after');
     } else {
       restoreEntry(entry, entry.after);
       focus = entry.el;
@@ -1490,6 +1762,13 @@ body {
       return;
     }
 
+    if (e.key === 'Escape' && (selectedElements.length || drag)) {
+      e.preventDefault();
+      endDrag(false);
+      selectElement(null);
+      return;
+    }
+
     if ((e.key === 'Delete' || e.key === 'Backspace') && selectedElement) {
       e.preventDefault();
       deleteSelected();
@@ -1511,6 +1790,15 @@ body {
   }
 
   function syncPanel(el) {
+    const isMulti = selectedElements.length > 1;
+    batchPanel.hidden = !isMulti;
+    if (isMulti) {
+      stylePanel.hidden = true;
+      placeholder.hidden = true;
+      elementActions.hidden = true;
+      syncBatchPanel();
+      return;
+    }
     if (!el) {
       stylePanel.hidden = true;
       placeholder.hidden = false;
@@ -1678,6 +1966,72 @@ body {
   });
 
   /* ---------------------------------------------------------------
+   * 일괄 편집 (복수 선택)
+   * ------------------------------------------------------------- */
+
+  const batchPanel = document.getElementById('batch-panel');
+  const batchFontInput = document.getElementById('batch-font-size');
+  const batchFontSummary = document.getElementById('batch-font-summary');
+
+  function currentFontSize(el) {
+    const n = parseFloat(previewFrame.contentWindow.getComputedStyle(el).fontSize);
+    return Number.isFinite(n) ? Math.round(n) : 16;
+  }
+
+  function syncBatchPanel() {
+    const sizes = selectedElements.map(currentFontSize);
+    const min = Math.min(...sizes);
+    const max = Math.max(...sizes);
+    // 입력 중인 칸의 값을 덮어쓰면 커서가 튀므로 건드리지 않는다.
+    if (document.activeElement !== batchFontInput) {
+      batchFontInput.value = min === max ? min : '';
+    }
+    batchFontSummary.textContent = min === max
+      ? `${selectedElements.length}개 요소 · 모두 ${min}px`
+      : `${selectedElements.length}개 요소 · 현재 ${min}~${max}px`;
+  }
+
+  // compute(현재 px) → 새 px. 모든 요소의 현재 크기를 먼저 읽은 뒤에 쓴다.
+  // 부모와 자식이 함께 선택됐을 때 부모를 먼저 바꾸면 자식의 상속값이
+  // 달라져 자식만 두 번 커지는 일을 막기 위해서다.
+  function applyBatchFontSize(compute) {
+    const items = selectedElements.map((el) => ({
+      el,
+      size: currentFontSize(el),
+      before: el.getAttribute('style')
+    }));
+    items.forEach((it) => {
+      it.el.style.setProperty('font-size', `${Math.max(1, compute(it.size))}px`);
+      it.after = it.el.getAttribute('style');
+      delete it.size;
+    });
+    pushBatchHistory('font-size', items);
+    syncBatchPanel();
+  }
+
+  document.querySelectorAll('[data-font-step]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const step = Number(btn.dataset.fontStep);
+      applyBatchFontSize((size) => size + step);
+    });
+  });
+
+  batchFontInput.addEventListener('input', () => {
+    const v = Number(batchFontInput.value);
+    if (batchFontInput.value === '' || !(v >= 1)) return;
+    applyBatchFontSize(() => Math.round(v));
+  });
+
+  // 포커스를 잃으면 실제 값 기준으로 다시 표시한다. (비워 둔 채 나간 경우 등)
+  batchFontInput.addEventListener('blur', () => {
+    if (selectedElements.length > 1) syncBatchPanel();
+  });
+
+  document.getElementById('clear-selection-btn').addEventListener('click', () => {
+    selectElement(null);
+  });
+
+  /* ---------------------------------------------------------------
    * 요소 트리 뷰
    * ------------------------------------------------------------- */
 
@@ -1743,15 +2097,17 @@ body {
     if (!el) return;
     // 보기 모드에서 트리를 눌렀다면 편집하려는 의도이므로 모드를 되돌린다.
     setMode('edit');
-    selectElement(el);
+    if (e.ctrlKey || e.metaKey || e.shiftKey || multiSelectMode) toggleInSelection(el);
+    else selectElement(el);
   });
 
-  function highlightTreeNode(el) {
-    const id = el ? el.getAttribute('data-editor-id') : null;
+  // 선택된 모든 요소를 트리에 표시한다. 스크롤은 단일 선택일 때만 따라간다.
+  function highlightTreeNode() {
+    const ids = new Set(selectedElements.map((s) => s.getAttribute('data-editor-id')));
     treeEl.querySelectorAll('.tree-node').forEach((btn) => {
-      const active = btn.dataset.editorId === id;
+      const active = ids.has(btn.dataset.editorId);
       btn.classList.toggle('is-active', active);
-      if (active) btn.scrollIntoView({ block: 'nearest' });
+      if (active && ids.size === 1) btn.scrollIntoView({ block: 'nearest' });
     });
   }
 
@@ -1875,6 +2231,19 @@ body {
     btn.addEventListener('click', () => setMode(btn.dataset.mode));
   });
 
+  /* --- 복수 선택 토글 -------------------------------------------- */
+
+  const multiSelectBtn = document.getElementById('multi-select-btn');
+
+  multiSelectBtn.addEventListener('click', () => {
+    multiSelectMode = !multiSelectMode;
+    multiSelectBtn.setAttribute('aria-pressed', String(multiSelectMode));
+    setMode('edit');
+    showToast(multiSelectMode
+      ? '복수 선택 켜짐: 클릭할 때마다 선택에 더하거나 뺍니다.'
+      : '복수 선택 꺼짐: 클릭하면 한 요소만 선택합니다.');
+  });
+
   /* ---------------------------------------------------------------
    * 반응형 미리보기
    * ------------------------------------------------------------- */
@@ -1900,7 +2269,7 @@ body {
   window.addEventListener('elementSelected', (e) => {
     const el = e.detail ? e.detail.element : null;
     syncPanel(el);
-    highlightTreeNode(el);
+    highlightTreeNode();
   });
 
   /* ---------------------------------------------------------------
