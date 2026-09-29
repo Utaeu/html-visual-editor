@@ -915,8 +915,8 @@ body {
       </div>
 
       <div class="panel" id="style-panel" hidden>
-        <section class="panel__group" id="image-position-group" hidden>
-          <h3 class="panel__heading">사진 위치</h3>
+        <section class="panel__group" id="position-group">
+          <h3 class="panel__heading">위치</h3>
           <div class="field">
             <span class="field__label">순서</span>
             <div class="field__control btn-group">
@@ -926,21 +926,23 @@ body {
                       title="뒤쪽 요소와 자리를 바꿉니다">↓ 뒤로</button>
             </div>
           </div>
-          <div class="field">
-            <span class="field__label">정렬</span>
-            <div class="field__control btn-group" id="image-align-group">
-              <button type="button" class="btn-align" data-image-align="left" title="왼쪽에 배치">좌</button>
-              <button type="button" class="btn-align" data-image-align="center" title="가운데에 배치">중</button>
-              <button type="button" class="btn-align" data-image-align="right" title="오른쪽에 배치">우</button>
+          <div id="image-align-field" hidden>
+            <div class="field">
+              <span class="field__label">사진 정렬</span>
+              <div class="field__control btn-group" id="image-align-group">
+                <button type="button" class="btn-align" data-image-align="left" title="왼쪽에 배치">좌</button>
+                <button type="button" class="btn-align" data-image-align="center" title="가운데에 배치">중</button>
+                <button type="button" class="btn-align" data-image-align="right" title="오른쪽에 배치">우</button>
+              </div>
             </div>
+            <p class="field__hint" id="image-align-notice" hidden>
+              가로로 나열된 영역 안에서는 정렬을 쓸 수 없습니다. 옆 요소의 배치까지 바뀌기 때문입니다. 순서 이동을 사용하세요.
+              (이미 정렬된 사진은 파란 버튼을 눌러 해제할 수 있습니다)
+            </p>
           </div>
-          <p class="field__hint" id="image-align-notice" hidden>
-            가로로 나열된 영역 안에서는 정렬을 쓸 수 없습니다. 옆 요소의 배치까지 바뀌기 때문입니다. 순서 이동을 사용하세요.
-            (이미 정렬된 사진은 파란 버튼을 눌러 해제할 수 있습니다)
-          </p>
           <p class="field__hint">
-            선택한 사진을 끌어서 다른 요소의 앞뒤로 옮길 수 있습니다. 파란 선이 놓일 자리입니다.
-            정렬 버튼을 다시 누르면 해제됩니다.
+            선택한 요소의 안쪽 아무 곳이나 누른 채 끌면 다른 요소의 앞뒤로 옮길 수 있습니다.
+            파란 선이 놓일 자리이고, 선이 안 보이는 곳에는 놓을 수 없습니다.
           </p>
         </section>
 
@@ -1226,7 +1228,7 @@ body {
         outline: 2px solid #ef4444 !important;
         outline-offset: -1px !important;
       }
-      img.${SELECTED_CLASS} {
+      .${SELECTED_CLASS} {
         cursor: grab !important;
       }
     `;
@@ -1406,18 +1408,74 @@ body {
     setSelection(additive ? [...base, ...hits] : hits);
   }
 
-  /* --- 사진 끌어서 옮기기 ------------------------------------------ */
+  /* --- 요소 끌어서 옮기기 ------------------------------------------ */
   // 픽셀 위치(absolute·top/left)는 건드리지 않고 HTML 안의 순서만 옮긴다.
   // 주변 요소가 자연스럽게 다시 배치되므로 화면 폭이 바뀌어도 깨지지 않는다.
+  // 놓으면 HTML 구조가 깨지는 자리는 canPlace()가 막는다.
 
   const dropLine = document.getElementById('drop-line');
   const EDGE_SCROLL = 40; // 미리보기 위·아래 끝에서 이 거리 안이면 자동으로 스크롤
   let moveDrag = null;
 
-  function beginMoveDrag(e) {
+  // 정해진 부모 안에만 있어야 하는 요소 → 놓을 수 있는 부모
+  const REQUIRED_PARENTS = {
+    LI: ['UL', 'OL', 'MENU'],
+    DT: ['DL'],
+    DD: ['DL'],
+    TR: ['TABLE', 'THEAD', 'TBODY', 'TFOOT'],
+    TD: ['TR'],
+    TH: ['TR'],
+    THEAD: ['TABLE'],
+    TBODY: ['TABLE'],
+    TFOOT: ['TABLE'],
+    CAPTION: ['TABLE'],
+    COLGROUP: ['TABLE'],
+    COL: ['COLGROUP'],
+    OPTION: ['SELECT', 'OPTGROUP', 'DATALIST'],
+    OPTGROUP: ['SELECT'],
+    SOURCE: ['PICTURE', 'VIDEO', 'AUDIO'],
+    TRACK: ['VIDEO', 'AUDIO'],
+    SUMMARY: ['DETAILS'],
+    LEGEND: ['FIELDSET'],
+    FIGCAPTION: ['FIGURE']
+  };
+
+  // 글자(인라인)만 담을 수 있는 요소. 이 안에 블록 요소를 넣으면 내보낸 파일을
+  // 다시 열 때 브라우저가 구조를 강제로 고쳐(예: <p>가 끊김) 레이아웃이 틀어진다.
+  const PHRASING_ONLY = 'p, h1, h2, h3, h4, h5, h6, span, button, label, strong, em, b, i, u, s, ' +
+    'small, mark, code, sub, sup, q, cite, abbr, time, pre, legend, summary';
+  const BLOCK_SELECTOR = 'address, article, aside, blockquote, details, dialog, div, dl, fieldset, ' +
+    'figcaption, figure, footer, form, h1, h2, h3, h4, h5, h6, header, hgroup, hr, main, menu, nav, ' +
+    'ol, p, pre, section, table, ul';
+
+  function containsOrIs(el, selector) {
+    return el.matches(selector) || !!el.querySelector(selector);
+  }
+
+  // el을 to 자리에 넣어도 HTML 구조가 유지되는지
+  function canPlace(el, to) {
+    if (!to || !to.parent || to.parent.nodeType !== 1) return false;
+    const parent = to.parent;
+    if (parent === el || el.contains(parent)) return false; // 자기 안에 자기를 넣을 수 없다.
+    if (parent.tagName === 'HTML' || parent.tagName === 'HEAD') return false;
+
+    const required = REQUIRED_PARENTS[el.tagName];
+    if (required) return required.includes(parent.tagName);
+    if (STRICT_PARENTS.has(parent.tagName)) return false;
+
+    if (containsOrIs(el, BLOCK_SELECTOR) && parent.closest(PHRASING_ONLY)) return false;
+    // 링크·버튼·폼은 서로 겹쳐 넣을 수 없다.
+    if (containsOrIs(el, 'a, button') && parent.closest('a, button')) return false;
+    if (containsOrIs(el, 'form') && parent.closest('form')) return false;
+    return true;
+  }
+
+  // el: 옮길 요소(선택된 요소), e.target: 실제로 누른 곳(선택된 요소의 안쪽일 수 있음)
+  function beginMoveDrag(e, el) {
     moveDrag = {
-      el: e.target,
-      doc: e.target.ownerDocument,
+      el,
+      clickTarget: e.target,
+      doc: el.ownerDocument,
       startX: e.clientX,
       startY: e.clientY,
       active: false,
@@ -1442,15 +1500,23 @@ body {
     else if (e.clientY > win.innerHeight - EDGE_SCROLL) win.scrollBy(0, 20);
 
     moveDrag.point = dropPointAt(moveDrag.doc, moveDrag.el, e.clientX, e.clientY);
-    drawDropLine(moveDrag.point);
+    drawDropLine(moveDrag.point && moveDrag.point.to ? moveDrag.point : null);
   }
 
   function endMoveDrag(apply) {
     if (!moveDrag) return;
-    const { el, active, point } = moveDrag;
+    const { el, active, point, clickTarget } = moveDrag;
     moveDrag = null;
     dropLine.hidden = true;
-    if (apply && active && point) moveElement(el, point.to);
+    if (!apply) return;
+
+    // 끌지 않고 뗐다면 평범한 클릭: 누른 안쪽 요소를 선택한다.
+    if (!active) {
+      if (clickTarget !== el && isEditable(clickTarget)) selectElement(clickTarget);
+      return;
+    }
+    if (point && point.to) moveElement(el, point.to);
+    else if (!point || !point.same) showToast('여기에는 놓을 수 없습니다. 파란 선이 보이는 곳에 놓으세요.');
   }
 
   // 가로로 나열되는 자리인지 (flex 가로·여러 열 grid·인라인 요소)
@@ -1494,25 +1560,65 @@ body {
     return next === el || next === skipBlank(el.nextSibling);
   }
 
+  // 포인터 위치에 el을 놓을 자리.
+  // 반환: null(놓을 수 없음) | { same: true }(제자리) | { to, before, rect, horizontal }
   function dropPointAt(doc, el, x, y) {
     const hit = doc.elementFromPoint(x, y);
     const target = hit && hit.closest('[data-editor-id]');
-    if (!target || target === el) return null;
+    if (!target) return null;
+    if (el.contains(target)) return { same: true }; // 자기 자신 위
 
     const win = doc.defaultView;
-    const targetRect = target.getBoundingClientRect();
-    const before = flowsHorizontally(win, target)
-      ? x < targetRect.left + targetRect.width / 2
-      : y < targetRect.top + targetRect.height / 2;
+    const sideAt = (node) => {
+      const r = node.getBoundingClientRect();
+      const before = flowsHorizontally(win, node)
+        ? x < r.left + r.width / 2
+        : y < r.top + r.height / 2;
+      return before ? 'before' : 'after';
+    };
 
-    const to = placementNear(doc, target, before ? 'before' : 'after');
-    if (!to || sameSpot(el, to)) return null;
+    let to = null;
+    const required = REQUIRED_PARENTS[el.tagName];
+    if (required) {
+      // li·tr 같은 요소: 같은 종류의 부모 안에서 형제 사이 자리만 찾는다.
+      for (let n = target; n && n !== doc.body; n = n.parentElement) {
+        if (n.parentElement && required.includes(n.parentElement.tagName)) {
+          const side = sideAt(n);
+          to = { parent: n.parentElement, nextSibling: side === 'before' ? n : n.nextSibling, anchor: n, side };
+          break;
+        }
+        if (required.includes(n.tagName)) {
+          // 목록 자체(빈 곳)에 놓으면 맨 끝에 넣는다.
+          to = { parent: n, nextSibling: null, anchor: n, side: 'after' };
+          break;
+        }
+      }
+    } else {
+      // 가리킨 요소 앞/뒤에 놓을 수 없으면(예: 문단 안에 상자) 감싸는 요소 쪽으로 올라가며 찾는다.
+      let node = target;
+      let first = true;
+      while (node && node !== doc.body && node !== doc.documentElement) {
+        const side = sideAt(node);
+        const cand = first ? placementNear(doc, node, side) : placementOutside(doc, node, side);
+        first = false;
+        if (!cand) break;
+        cand.side = side;
+        if (canPlace(el, cand)) {
+          to = cand;
+          break;
+        }
+        node = cand.anchor.parentElement;
+      }
+    }
+
+    if (!to || !canPlace(el, to)) return null;
+    if (sameSpot(el, to)) return { same: true };
 
     // 칸 안쪽에 넣을 때는 세로로 쌓이므로 가로선으로 표시한다.
     const inside = to.parent === to.anchor;
     return {
       to,
-      before,
+      before: to.side === 'before',
       rect: to.anchor.getBoundingClientRect(),
       horizontal: !inside && flowsHorizontally(win, to.anchor)
     };
@@ -1576,9 +1682,11 @@ body {
       // Ctrl(맥은 Cmd)·Shift+클릭 또는 복수 선택 모드에서는 목록에 더하거나 뺀다.
       const additive = e.ctrlKey || e.metaKey || e.shiftKey || multiSelectMode;
 
-      // 이미 선택된 사진을 누르면 범위 선택 대신 사진 옮기기를 시작한다.
-      if (e.button === 0 && !additive && e.target === selectedElement && e.target.tagName === 'IMG') {
-        beginMoveDrag(e);
+      // 선택된 요소(또는 그 안쪽)를 누르면 범위 선택 대신 옮기기를 준비한다.
+      // 끌지 않고 떼면 endMoveDrag가 평범한 클릭으로 처리한다.
+      if (e.button === 0 && !additive && selectedElement &&
+          (e.target === selectedElement || selectedElement.contains(e.target))) {
+        beginMoveDrag(e, selectedElement);
         return;
       }
 
@@ -2650,11 +2758,10 @@ body {
     stylePanel.hidden = false;
     elementActions.hidden = false;
 
-    // 사진 전용: 사진 바꾸기, 사진 위치(순서·정렬)
+    // 위치(순서 이동)는 모든 요소, 사진 바꾸기·사진 정렬은 사진 전용
     const isImage = el.tagName === 'IMG';
     replaceImageBtn.hidden = !isImage;
-    imagePositionGroup.hidden = !isImage;
-    if (isImage) syncImagePosition(el);
+    syncPosition(el);
 
     // 내용
     syncTextContent(el);
@@ -3275,9 +3382,9 @@ body {
     if (selectedElement === el) syncPanel(el);
   }
 
-  /* --- 사진 위치: 순서 이동 / 정렬 ------------------------------ */
+  /* --- 위치: 순서 이동(모든 요소) / 정렬(사진 전용) -------------- */
 
-  const imagePositionGroup = document.getElementById('image-position-group');
+  const imageAlignField = document.getElementById('image-align-field');
   const moveUpBtn = document.getElementById('move-up-btn');
   const moveDownBtn = document.getElementById('move-down-btn');
   const imageAlignButtons = Array.from(document.querySelectorAll('[data-image-align]'));
@@ -3314,12 +3421,18 @@ body {
   }
 
   // ↑/↓ 한 칸 이동할 자리. 형제 끝에 닿으면 감싸는 요소 밖으로 나간다.
+  // (목록 항목처럼 밖으로 나갈 수 없는 요소는 끝에서 멈춘다)
   function stepTarget(el, dir) {
     const sib = editableSibling(el, dir);
-    if (sib) return { parent: el.parentNode, nextSibling: dir < 0 ? sib : sib.nextSibling };
-    const parent = el.parentElement;
-    if (!parent || !parent.hasAttribute('data-editor-id')) return null;
-    return placementOutside(el.ownerDocument, parent, dir < 0 ? 'before' : 'after');
+    let to;
+    if (sib) {
+      to = { parent: el.parentNode, nextSibling: dir < 0 ? sib : sib.nextSibling };
+    } else {
+      const parent = el.parentElement;
+      if (!parent || !parent.hasAttribute('data-editor-id')) return null;
+      to = placementOutside(el.ownerDocument, parent, dir < 0 ? 'before' : 'after');
+    }
+    return canPlace(el, to) ? to : null;
   }
 
   // 가로로 나열된 flex 안에서는 좌우 margin: auto가 옆 요소들까지 밀어내므로 정렬을 막는다.
@@ -3337,9 +3450,13 @@ body {
       el.style.marginRight === IMAGE_ALIGN[key]['margin-right']) || null;
   }
 
-  function syncImagePosition(el) {
+  function syncPosition(el) {
     moveUpBtn.disabled = !stepTarget(el, -1);
     moveDownBtn.disabled = !stepTarget(el, 1);
+    const isImage = el.tagName === 'IMG';
+    imageAlignField.hidden = !isImage;
+    if (!isImage) return;
+
     const blocked = inHorizontalFlex(el);
     const align = currentImageAlign(el);
     imageAlignButtons.forEach((btn) => {
@@ -3383,6 +3500,7 @@ body {
 
   // 검증용
   window.FrontEndEditor.moveElement = moveElement;
+  window.FrontEndEditor.canPlace = canPlace;
   window.FrontEndEditor.dropPointAt = (x, y) =>
     dropPointAt(previewFrame.contentDocument, selectedElement, x, y);
 
