@@ -32,6 +32,8 @@ HTML Visual Editor: `index.html` 파일을 불러와 텍스트·색상·레이�
 - 선택 모델: `selectedElements` 배열이 기준이고, 모든 선택 변경은 `setSelection(list)`을 거친다(`selectElement(el)`은 한 개짜리 래퍼, `toggleInSelection`은 Ctrl+클릭). 한 개일 때만 `selectedElement`가 채워져 단일 편집 패널이 뜨고, 두 개 이상이면 `selectedElement`는 null이고 `#batch-panel`(일괄 글자 크기)이 뜬다. 선택 표시는 모두 `__editor-selected` 클래스를 공유한다.
 - 드래그 범위 선택: 미리보기 문서의 mousedown/mousemove/mouseup으로 처리하고, 사각형(`#drag-box`)은 미리보기가 아니라 편집기 문서에 `position: fixed`로 그린다. 직접 텍스트 노드를 가진 요소만 대상.
 - 일괄 편집 되돌리기: `pushBatchHistory()`가 `{ type: 'batch', key, items: [{ el, before, after }] }` 한 항목으로 기록한다. 글자 크기는 모든 요소의 computed 값을 먼저 읽은 뒤 쓴다(부모·자식 동시 선택 시 이중 적용 방지).
+- 사진 추가/바꾸기: 사진은 HTML에 넣지 않고 경로로 연결한다. 고른 파일은 blob URL로 미리보고 `insertedAssets`(blob URL → `{ ref, file, needsCopy }`)에 기록하며, 내보낼 때 `restoreAssetRefs()`가 `project.reverse`와 함께 경로로 되돌린다(파일 하나만 연 경우에도 동작). 사진 바꾸기는 `aspect-ratio` + `object-fit: cover`로 칸을 유지하고 'attrs' 히스토리 항목(`src/srcset/sizes/style` 스냅샷)으로 기록한다. 내보내기 후 복사할 사진 목록(`pendingImageCopies`)을 토스트로 알린다.
+- 사진 위치: **DOM 순서 이동과 정렬만** 한다. absolute·top/left로 픽셀 위치를 옮기는 자유 배치는 넣지 않는다(사용자 결정). 선택된 `<img>`를 mousedown하면 범위 선택 대신 `beginMoveDrag`가 시작되고, `dropPointAt()`이 요소 앞/뒤 자리를 구해 편집기 문서의 `#drop-line`으로 표시한다. 목록·표 부모(`STRICT_PARENTS`)에는 직접 넣지 않고 칸(`FLOW_CELLS`) 안이나 구조 밖으로 보낸다. 이동은 'move' 히스토리 항목(`from`/`to` = 부모 + 기준 형제)으로 기록한다. 정렬은 `display:block` + 좌우 margin이며, 가로 flex 부모 안에서는 막는다.
 - 하위 요소가 있는 요소는 텍스트 직접 편집 불가(하위 구조 보호). 예외: 자식이 `<br>`뿐인 요소.
 - 내용 편집의 줄바꿈: `readEditableText()`/`writeEditableText()`가 입력칸의 `
 ` ↔ `<br>`을 변환한다(`pre` 계열 white-space 요소는 `

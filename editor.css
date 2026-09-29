@@ -172,6 +172,15 @@ body {
   pointer-events: none;
 }
 
+.drop-line {
+  position: fixed;
+  z-index: 50;
+  background: #3b82f6;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.8);
+  pointer-events: none;
+}
+
 .mode-badge {
   position: absolute;
   top: 28px;
@@ -519,6 +528,13 @@ body {
   cursor: pointer;
 }
 
+/* 복제·삭제 줄 아래에 한 줄 전체로 놓이는 버튼 */
+.btn-action--block {
+  display: block;
+  width: 100%;
+  margin: -6px 0 14px;
+}
+
 .btn-action:hover {
   background: #f4f5f7;
   border-color: #b9bfc9;
@@ -737,6 +753,12 @@ body {
 
 .btn-align:hover {
   background: #f4f5f7;
+}
+
+.btn-align:disabled {
+  color: #c4c8d0;
+  background: #f4f5f7;
+  cursor: not-allowed;
 }
 
 .btn-align.is-active {

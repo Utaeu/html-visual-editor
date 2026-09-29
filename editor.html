@@ -15,6 +15,9 @@
       <label class="btn btn--secondary" for="folder-input"
              title="CSS·이미지·스크립트가 들어 있는 프로젝트 폴더를 통째로 엽니다">폴더 열기</label>
       <input id="folder-input" type="file" webkitdirectory multiple hidden />
+      <button type="button" class="btn btn--secondary" id="insert-image-btn" disabled
+              title="사진 파일을 선택한 요소 뒤에 넣습니다 (HTML에는 경로로 연결)">사진 추가</button>
+      <input id="image-input" type="file" accept="image/*" hidden />
       <span id="file-name" class="file-name"></span>
       <select id="page-select" class="page-select" title="폴더 안의 다른 페이지 열기" hidden></select>
 
@@ -77,6 +80,8 @@
         <button type="button" class="btn-action btn-action--danger" id="delete-btn"
                 title="선택한 요소를 삭제합니다 (Delete)">삭제</button>
       </div>
+      <button type="button" class="btn-action btn-action--block" id="replace-image-btn" hidden
+              title="칸 크기는 그대로 두고 사진만 다른 파일로 바꿉니다">사진 바꾸기</button>
 
       <p class="sidebar__placeholder" id="sidebar-placeholder">
         요소를 선택하면 이곳에 편집 옵션이 표시됩니다.<br />
@@ -105,6 +110,35 @@
       </div>
 
       <div class="panel" id="style-panel" hidden>
+        <section class="panel__group" id="image-position-group" hidden>
+          <h3 class="panel__heading">사진 위치</h3>
+          <div class="field">
+            <span class="field__label">순서</span>
+            <div class="field__control btn-group">
+              <button type="button" class="btn-tool" id="move-up-btn"
+                      title="앞쪽 요소와 자리를 바꿉니다">↑ 앞으로</button>
+              <button type="button" class="btn-tool" id="move-down-btn"
+                      title="뒤쪽 요소와 자리를 바꿉니다">↓ 뒤로</button>
+            </div>
+          </div>
+          <div class="field">
+            <span class="field__label">정렬</span>
+            <div class="field__control btn-group" id="image-align-group">
+              <button type="button" class="btn-align" data-image-align="left" title="왼쪽에 배치">좌</button>
+              <button type="button" class="btn-align" data-image-align="center" title="가운데에 배치">중</button>
+              <button type="button" class="btn-align" data-image-align="right" title="오른쪽에 배치">우</button>
+            </div>
+          </div>
+          <p class="field__hint" id="image-align-notice" hidden>
+            가로로 나열된 영역 안에서는 정렬을 쓸 수 없습니다. 옆 요소의 배치까지 바뀌기 때문입니다. 순서 이동을 사용하세요.
+            (이미 정렬된 사진은 파란 버튼을 눌러 해제할 수 있습니다)
+          </p>
+          <p class="field__hint">
+            선택한 사진을 끌어서 다른 요소의 앞뒤로 옮길 수 있습니다. 파란 선이 놓일 자리입니다.
+            정렬 버튼을 다시 누르면 해제됩니다.
+          </p>
+        </section>
+
         <section class="panel__group">
           <h3 class="panel__heading">내용</h3>
           <div class="content-tools">
@@ -312,6 +346,8 @@
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
   <!-- 드래그 범위 선택 사각형. 미리보기 문서를 건드리지 않도록 편집기 쪽에 그린다. -->
   <div class="drag-box" id="drag-box" hidden></div>
+  <!-- 사진을 끌어 옮길 때 놓일 자리를 보여 주는 선 -->
+  <div class="drop-line" id="drop-line" hidden></div>
 
   <script src="editor.js"></script>
 </body>

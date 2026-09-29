@@ -1,5 +1,7 @@
 (() => {
   const fileInput = document.getElementById('file-input');
+  const imageInput = document.getElementById('image-input');
+  const insertImageBtn = document.getElementById('insert-image-btn');
   const fileNameLabel = document.getElementById('file-name');
   const dropzone = document.getElementById('dropzone');
   const previewFrame = document.getElementById('preview-frame');
@@ -66,6 +68,9 @@
       .${SELECTED_CLASS} {
         outline: 2px solid #ef4444 !important;
         outline-offset: -1px !important;
+      }
+      img.${SELECTED_CLASS} {
+        cursor: grab !important;
       }
     `;
     (doc.head || doc.documentElement).appendChild(style);
@@ -244,9 +249,155 @@
     setSelection(additive ? [...base, ...hits] : hits);
   }
 
+  /* --- 사진 끌어서 옮기기 ------------------------------------------ */
+  // 픽셀 위치(absolute·top/left)는 건드리지 않고 HTML 안의 순서만 옮긴다.
+  // 주변 요소가 자연스럽게 다시 배치되므로 화면 폭이 바뀌어도 깨지지 않는다.
+
+  const dropLine = document.getElementById('drop-line');
+  const EDGE_SCROLL = 40; // 미리보기 위·아래 끝에서 이 거리 안이면 자동으로 스크롤
+  let moveDrag = null;
+
+  function beginMoveDrag(e) {
+    moveDrag = {
+      el: e.target,
+      doc: e.target.ownerDocument,
+      startX: e.clientX,
+      startY: e.clientY,
+      active: false,
+      point: null
+    };
+  }
+
+  function updateMoveDrag(e) {
+    if (!moveDrag) return;
+    if (e.buttons === 0) {
+      endMoveDrag(false);
+      return;
+    }
+    if (!moveDrag.active) {
+      if (Math.abs(e.clientX - moveDrag.startX) < DRAG_THRESHOLD &&
+          Math.abs(e.clientY - moveDrag.startY) < DRAG_THRESHOLD) return;
+      moveDrag.active = true;
+      setHovered(null);
+    }
+    const win = e.view;
+    if (e.clientY < EDGE_SCROLL) win.scrollBy(0, -20);
+    else if (e.clientY > win.innerHeight - EDGE_SCROLL) win.scrollBy(0, 20);
+
+    moveDrag.point = dropPointAt(moveDrag.doc, moveDrag.el, e.clientX, e.clientY);
+    drawDropLine(moveDrag.point);
+  }
+
+  function endMoveDrag(apply) {
+    if (!moveDrag) return;
+    const { el, active, point } = moveDrag;
+    moveDrag = null;
+    dropLine.hidden = true;
+    if (apply && active && point) moveElement(el, point.to);
+  }
+
+  // 가로로 나열되는 자리인지 (flex 가로·여러 열 grid·인라인 요소)
+  function flowsHorizontally(win, node) {
+    const parent = node.parentElement;
+    if (parent) {
+      const pcs = win.getComputedStyle(parent);
+      if (pcs.display.includes('flex')) return pcs.flexDirection.startsWith('row');
+      if (pcs.display.includes('grid')) return pcs.gridTemplateColumns.trim().split(/\s+/).length > 1;
+    }
+    return win.getComputedStyle(node).display.startsWith('inline');
+  }
+
+  // node의 앞/뒤 자리. 목록·표처럼 사진이 직접 들어갈 수 없는 부모 안이면
+  // 그 구조 전체의 앞/뒤로 올라간다. anchor는 표시선을 그릴 기준 요소.
+  function placementOutside(doc, node, side) {
+    let n = node;
+    while (n.parentElement && STRICT_PARENTS.has(n.parentElement.tagName)) n = n.parentElement;
+    if (!n.parentElement || n === doc.body || n === doc.documentElement) return null;
+    return { parent: n.parentElement, nextSibling: side === 'before' ? n : n.nextSibling, anchor: n };
+  }
+
+  // 끌어다 놓을 자리. 목록·표의 칸(li·td 등)에 놓으면 칸 안쪽 처음/끝에 넣는다.
+  function placementNear(doc, target, side) {
+    const parent = target.parentElement;
+    if (parent && STRICT_PARENTS.has(parent.tagName) && FLOW_CELLS.has(target.tagName)) {
+      return { parent: target, nextSibling: side === 'before' ? target.firstChild : null, anchor: target };
+    }
+    return placementOutside(doc, target, side);
+  }
+
+  // 공백 텍스트만 사이에 있으면 같은 자리로 본다.
+  function sameSpot(el, to) {
+    const skipBlank = (n) => {
+      let cur = n;
+      while (cur && cur.nodeType === Node.TEXT_NODE && !cur.nodeValue.trim()) cur = cur.nextSibling;
+      return cur;
+    };
+    if (to.parent !== el.parentNode) return false;
+    const next = skipBlank(to.nextSibling);
+    return next === el || next === skipBlank(el.nextSibling);
+  }
+
+  function dropPointAt(doc, el, x, y) {
+    const hit = doc.elementFromPoint(x, y);
+    const target = hit && hit.closest('[data-editor-id]');
+    if (!target || target === el) return null;
+
+    const win = doc.defaultView;
+    const targetRect = target.getBoundingClientRect();
+    const before = flowsHorizontally(win, target)
+      ? x < targetRect.left + targetRect.width / 2
+      : y < targetRect.top + targetRect.height / 2;
+
+    const to = placementNear(doc, target, before ? 'before' : 'after');
+    if (!to || sameSpot(el, to)) return null;
+
+    // 칸 안쪽에 넣을 때는 세로로 쌓이므로 가로선으로 표시한다.
+    const inside = to.parent === to.anchor;
+    return {
+      to,
+      before,
+      rect: to.anchor.getBoundingClientRect(),
+      horizontal: !inside && flowsHorizontally(win, to.anchor)
+    };
+  }
+
+  // 표시선은 미리보기 문서가 아니라 편집기 문서에 그린다. (내보내기 오염 방지)
+  function drawDropLine(point) {
+    if (!point) {
+      dropLine.hidden = true;
+      return;
+    }
+    const frameRect = previewFrame.getBoundingClientRect();
+    const ox = frameRect.left + previewFrame.clientLeft;
+    const oy = frameRect.top + previewFrame.clientTop;
+    const maxX = previewFrame.clientWidth;
+    const maxY = previewFrame.clientHeight;
+    const clamp = (v, max) => Math.min(Math.max(v, 0), max);
+    const { rect, horizontal, before } = point;
+    const THICK = 3;
+
+    let left; let top; let width; let height;
+    if (horizontal) {
+      left = clamp((before ? rect.left : rect.right) - THICK / 2, maxX - THICK);
+      top = clamp(rect.top, maxY);
+      width = THICK;
+      height = clamp(rect.bottom, maxY) - top;
+    } else {
+      left = clamp(rect.left, maxX);
+      top = clamp((before ? rect.top : rect.bottom) - THICK / 2, maxY - THICK);
+      width = clamp(rect.right, maxX) - left;
+      height = THICK;
+    }
+    dropLine.style.left = `${ox + left}px`;
+    dropLine.style.top = `${oy + top}px`;
+    dropLine.style.width = `${Math.max(width, THICK)}px`;
+    dropLine.style.height = `${Math.max(height, THICK)}px`;
+    dropLine.hidden = false;
+  }
+
   function attachSelectionHandlers(doc) {
     doc.addEventListener('mouseover', (e) => {
-      if (mode !== 'edit' || drag) return;
+      if (mode !== 'edit' || drag || moveDrag) return;
       setHovered(isEditable(e.target) ? e.target : null);
     }, true);
 
@@ -267,6 +418,13 @@
 
       // Ctrl(맥은 Cmd)·Shift+클릭 또는 복수 선택 모드에서는 목록에 더하거나 뺀다.
       const additive = e.ctrlKey || e.metaKey || e.shiftKey || multiSelectMode;
+
+      // 이미 선택된 사진을 누르면 범위 선택 대신 사진 옮기기를 시작한다.
+      if (e.button === 0 && !additive && e.target === selectedElement && e.target.tagName === 'IMG') {
+        beginMoveDrag(e);
+        return;
+      }
+
       if (e.button === 0) beginDrag(e, additive);
 
       if (isEditable(e.target)) {
@@ -278,8 +436,19 @@
       }
     }, true);
 
-    doc.addEventListener('mousemove', updateDrag, true);
-    doc.addEventListener('mouseup', () => endDrag(true), true);
+    doc.addEventListener('mousemove', (e) => {
+      updateDrag(e);
+      updateMoveDrag(e);
+    }, true);
+    doc.addEventListener('mouseup', () => {
+      endDrag(true);
+      endMoveDrag(true);
+    }, true);
+
+    // 편집 모드에서는 브라우저 기본 이미지 끌기(파일로 끌어내기)를 막는다.
+    doc.addEventListener('dragstart', (e) => {
+      if (mode === 'edit') e.preventDefault();
+    }, true);
 
     doc.addEventListener('click', (e) => {
       // 편집 모드: 캡처 단계에서 가로채 원본 동작을 모두 막는다.
@@ -357,6 +526,8 @@
     hoveredElement = null;
     drag = null;
     dragBox.hidden = true;
+    moveDrag = null;
+    dropLine.hidden = true;
     renderSelectionInfo(null);
     syncPanel(null);
 
@@ -371,12 +542,17 @@
     buildTree(doc);
 
     document.getElementById('export-btn').disabled = false;
+    insertImageBtn.disabled = false;
     modeButtons.forEach((btn) => { btn.disabled = false; });
     multiSelectBtn.disabled = false;
   });
 
   // 미리보기 밖에서 버튼을 떼더라도 드래그를 마무리한다.
-  window.addEventListener('mouseup', () => endDrag(true));
+  // (사진 옮기기는 놓을 자리가 미리보기 안에 있어야 하므로 취소한다)
+  window.addEventListener('mouseup', () => {
+    endDrag(true);
+    endMoveDrag(false);
+  });
 
   // 이후 단계(속성 패널·내보내기)에서 사용하는 공용 접근자
   window.FrontEndEditor = {
@@ -404,6 +580,10 @@
 
   // 폴더로 열었을 때의 상태. 파일 하나만 열었다면 null.
   let project = null;
+
+  // 사진 추가·바꾸기로 들어온 사진. blob URL → { ref: HTML에 적을 경로, file, needsCopy }
+  // 파일 하나만 연 경우에도 쓰므로 project와 따로 둔다.
+  const insertedAssets = new Map();
 
   const HTML_FILE_RE = /\.html?$/i;
 
@@ -556,12 +736,17 @@
 
   // 내보내기 직전: blob URL을 원래 적혀 있던 경로로 되돌린다.
   function restoreAssetRefs(html) {
-    if (!project) return html;
     let out = html;
-    project.reverse.forEach((raw, url) => {
-      out = out.split(url).join(raw);
-    });
+    const swap = (url, raw) => { out = out.split(url).join(raw); };
+    if (project) project.reverse.forEach((raw, url) => swap(url, raw));
+    // 새로 넣은 사진은 속성값 안에 들어가므로 &만 이스케이프한다.
+    insertedAssets.forEach((asset, url) => swap(url, asset.ref.replace(/&/g, '&amp;')));
     return out;
+  }
+
+  function releaseInsertedAssets() {
+    insertedAssets.forEach((_, url) => URL.revokeObjectURL(url));
+    insertedAssets.clear();
   }
 
   function releaseProject() {
@@ -574,6 +759,7 @@
   function startDocument(name, html) {
     editorIdCounter = 0;
     originalFileName = name;
+    releaseInsertedAssets();
     loadHtmlIntoPreview(html);
   }
 
@@ -893,7 +1079,8 @@
   });
 
   const customFontField = document.getElementById('font-family-custom-field');
-  const alignButtons = Array.from(document.querySelectorAll('.btn-align'));
+  // 텍스트 정렬 버튼만. (사진 정렬 버튼도 .btn-align 모양을 쓰므로 data-align으로 구분)
+  const alignButtons = Array.from(document.querySelectorAll('.btn-align[data-align]'));
 
   const SHADOW_PRESET = '0 2px 8px rgba(0, 0, 0, 0.2)';
 
@@ -1070,8 +1257,23 @@
     else el.setAttribute('style', value);
   }
 
+  // 여러 속성을 한꺼번에 기록하는 'attrs' 항목용. { 속성이름: 값 | null }
+  function snapshotAttrs(el, names) {
+    const snap = {};
+    names.forEach((name) => { snap[name] = el.getAttribute(name); });
+    return snap;
+  }
+
+  function restoreAttrs(el, snap) {
+    Object.entries(snap).forEach(([name, value]) => {
+      if (value === null) el.removeAttribute(name);
+      else el.setAttribute(name, value);
+    });
+  }
+
   function restoreEntry(entry, value) {
     if (entry.type === 'text') entry.el.innerHTML = value;
+    else if (entry.type === 'attrs') restoreAttrs(entry.el, value);
     else restoreStyleAttr(entry.el, value);
   }
 
@@ -1108,7 +1310,11 @@
   const STRUCTURAL_TYPES = new Set(['insert', 'remove']);
 
   function reinsertNode(entry) {
-    const { el, parent, nextSibling } = entry;
+    placeNode(entry.el, entry);
+  }
+
+  // el을 { parent, nextSibling } 자리에 넣는다.
+  function placeNode(el, { parent, nextSibling }) {
     if (!parent.isConnected) {
       showToast('되돌릴 위치가 현재 화면에 없습니다.');
       return;
@@ -1119,6 +1325,24 @@
     } else {
       parent.appendChild(el);
     }
+  }
+
+  // 요소 순서 이동. 옮기기 전(from)과 후(to) 자리를 함께 남긴다.
+  function pushMoveHistory(el, from, to) {
+    if (isRestoring) return;
+    history.length = historyIndex + 1; // 되돌린 뒤 새로 편집하면 redo 이력은 폐기
+    history.push({ el, from, to, type: 'move', key: null });
+    historyIndex = history.length - 1;
+    lastCommitTime = 0;
+    updateHistoryButtons();
+  }
+
+  function applyMove(entry, spot) {
+    placeNode(entry.el, spot);
+    const doc = previewFrame.contentDocument;
+    if (doc) buildTree(doc);
+    highlightTreeNode();
+    return entry.el;
   }
 
   // 노드를 되살리거나(attach) 떼어낸 뒤, 이어서 선택할 대상을 돌려준다.
@@ -1145,6 +1369,8 @@
     if (STRUCTURAL_TYPES.has(entry.type)) {
       // 넣었던 것은 빼고, 지웠던 것은 되살린다.
       focus = applyStructural(entry, entry.type === 'remove');
+    } else if (entry.type === 'move') {
+      focus = applyMove(entry, entry.from);
     } else if (entry.type === 'batch') {
       focus = restoreBatch(entry, 'before');
     } else {
@@ -1165,6 +1391,8 @@
     let focus;
     if (STRUCTURAL_TYPES.has(entry.type)) {
       focus = applyStructural(entry, entry.type === 'insert');
+    } else if (entry.type === 'move') {
+      focus = applyMove(entry, entry.to);
     } else if (entry.type === 'batch') {
       focus = restoreBatch(entry, 'after');
     } else {
@@ -1209,6 +1437,13 @@
       return;
     }
 
+    // 사진을 끄는 중이면 Esc는 옮기기만 취소하고 선택은 그대로 둔다.
+    if (e.key === 'Escape' && moveDrag) {
+      e.preventDefault();
+      endMoveDrag(false);
+      return;
+    }
+
     if (e.key === 'Escape' && (selectedElements.length || drag)) {
       e.preventDefault();
       endDrag(false);
@@ -1243,6 +1478,7 @@
       stylePanel.hidden = true;
       placeholder.hidden = true;
       elementActions.hidden = true;
+      replaceImageBtn.hidden = true;
       syncBatchPanel();
       return;
     }
@@ -1250,11 +1486,18 @@
       stylePanel.hidden = true;
       placeholder.hidden = false;
       elementActions.hidden = true;
+      replaceImageBtn.hidden = true;
       return;
     }
     placeholder.hidden = true;
     stylePanel.hidden = false;
     elementActions.hidden = false;
+
+    // 사진 전용: 사진 바꾸기, 사진 위치(순서·정렬)
+    const isImage = el.tagName === 'IMG';
+    replaceImageBtn.hidden = !isImage;
+    imagePositionGroup.hidden = !isImage;
+    if (isImage) syncImagePosition(el);
 
     // 내용
     syncTextContent(el);
@@ -1666,6 +1909,365 @@
   deleteBtn.addEventListener('click', deleteSelected);
 
   /* ---------------------------------------------------------------
+   * 사진 추가 / 사진 바꾸기
+   *
+   * 사진은 HTML에 넣지 않고 경로(예: images/a.jpg)로 연결한다. 미리보기에서는
+   * 고른 파일을 blob URL로 보여 주고, 내보낼 때 restoreAssetRefs()가 그 URL을
+   * 경로로 바꾼다. 브라우저는 폴더에 파일을 쓸 수 없으므로 사진 파일 복사는
+   * 사용자가 해야 하고, 복사할 목록은 추가할 때와 내보낼 때 알려 준다.
+   * ------------------------------------------------------------- */
+
+  const replaceImageBtn = document.getElementById('replace-image-btn');
+  const DEFAULT_IMAGE_DIR = 'images/';
+  // 이미지가 직접 들어가면 안 되는 부모. 이 안의 요소를 기준으로 삼았다면 위치를 옮긴다.
+  const STRICT_PARENTS = new Set([
+    'UL', 'OL', 'DL', 'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'COLGROUP',
+    'SELECT', 'OPTGROUP', 'DATALIST', 'PICTURE', 'HEAD', 'HTML'
+  ]);
+  // 위 부모의 자식이지만 안쪽에는 이미지를 넣어도 되는 요소
+  const FLOW_CELLS = new Set(['LI', 'TD', 'TH', 'DD', 'DT']);
+  // 사진 바꾸기가 건드리는 속성. 되돌리기는 이 스냅샷으로 한다.
+  const IMAGE_ATTRS = ['src', 'srcset', 'sizes', 'style'];
+
+  let imageAction = 'insert'; // 파일 선택 창을 어떤 동작으로 열었는지: 'insert' | 'replace'
+
+  function sameFile(a, b) {
+    return a.name === b.name && a.size === b.size && a.lastModified === b.lastModified;
+  }
+
+  // 공백·#·?·%는 경로로 쓰면 뜻이 달라지므로 인코딩한다. 한글은 그대로 둔다.
+  function toUrlPath(path) {
+    return path.replace(/[%#? ]/g, encodeURIComponent);
+  }
+
+  function fromUrlPath(path) {
+    try { return decodeURIComponent(path); } catch { return path; }
+  }
+
+  // 폴더 기준 경로 → fromDir에서 본 상대 경로
+  function relativePath(fromDir, toPath) {
+    const from = fromDir.split('/').filter(Boolean);
+    const to = toPath.split('/');
+    let i = 0;
+    while (i < from.length && i < to.length - 1 && from[i] === to[i]) i += 1;
+    return '../'.repeat(from.length - i) + to.slice(i).join('/');
+  }
+
+  // 미리보기의 src(blob URL일 수 있음) → HTML에 적혀 있던(적힐) 원래 표기
+  function originalRef(value) {
+    if (!value) return '';
+    if (insertedAssets.has(value)) return insertedAssets.get(value).ref;
+    if (project && project.reverse.has(value)) return project.reverse.get(value);
+    return value;
+  }
+
+  // 새 사진을 둘 폴더: 문서의 기존 사진이 가장 많이 있는 폴더, 없으면 images/
+  function guessImageDir(doc) {
+    const counts = new Map();
+    doc.querySelectorAll('img[src]').forEach((img) => {
+      const raw = originalRef(img.getAttribute('src'));
+      if (!isRelativeRef(raw)) return;
+      const dir = dirOf(raw.split(/[?#]/)[0]);
+      counts.set(dir, (counts.get(dir) || 0) + 1);
+    });
+    let best = DEFAULT_IMAGE_DIR;
+    let most = 0;
+    counts.forEach((n, dir) => {
+      if (n > most) { best = dir; most = n; }
+    });
+    return best;
+  }
+
+  // 같은 폴더·같은 이름의 다른 파일을 덮어쓰지 않도록 이름 뒤에 -1, -2…를 붙인다.
+  // (파일 하나만 연 경우 실제 폴더 내용은 알 수 없어 이번 편집에서 쓴 경로만 피한다)
+  function uniqueImageRef(dir, name, pageDir) {
+    const dot = name.lastIndexOf('.');
+    const stem = dot > 0 ? name.slice(0, dot) : name;
+    const ext = dot > 0 ? name.slice(dot) : '';
+    const taken = (ref) =>
+      (project && findFile(resolvePath(pageDir, ref))) ||
+      Array.from(insertedAssets.values()).some((a) => a.ref === ref);
+    let ref = dir + toUrlPath(name);
+    for (let k = 1; taken(ref); k += 1) ref = dir + toUrlPath(`${stem}-${k}${ext}`);
+    return ref;
+  }
+
+  // 고른 사진 파일 → 미리보기용 blob URL과 HTML에 적을 경로
+  function imageAssetFor(file, dir) {
+    // 같은 사진을 다시 고르면 이미 정한 경로를 그대로 쓴다.
+    for (const [url, asset] of insertedAssets) {
+      if (sameFile(asset.file, file)) return { url, ...asset };
+    }
+
+    const pageDir = project ? dirOf(project.currentPage) : '';
+    // 폴더 안에 이미 있는 사진을 골랐다면 그 파일을 가리키고, 복사는 필요 없다.
+    const inFolder = project
+      ? Array.from(project.files).find(([, f]) => sameFile(f, file))
+      : null;
+    const asset = inFolder
+      ? { ref: toUrlPath(relativePath(pageDir, inFolder[0])), file, needsCopy: false }
+      : { ref: uniqueImageRef(dir, file.name, pageDir), file, needsCopy: true };
+
+    const url = URL.createObjectURL(file);
+    insertedAssets.set(url, asset);
+    return { url, ...asset };
+  }
+
+  function imageAddedMessage(asset, verb) {
+    const path = fromUrlPath(asset.ref);
+    return asset.needsCopy
+      ? `사진을 ${verb}. 내보낸 뒤 사진 파일을 HTML 기준 ‘${path}’ 위치에 복사하세요.`
+      : `사진을 ${verb}. 폴더에 있는 ‘${path}’ 파일로 연결됩니다.`;
+  }
+
+  // 선택한 요소 바로 뒤. 목록·표처럼 이미지가 직접 들어갈 수 없는 부모라면
+  // 칸(li·td 등) 안쪽 끝이나 그 구조 전체의 뒤로 옮긴다.
+  function imageInsertPoint(doc, anchor) {
+    let node = anchor;
+    while (node && node.parentNode && node !== doc.body) {
+      const parent = node.parentNode;
+      if (!STRICT_PARENTS.has(parent.tagName)) return { parent, nextSibling: node.nextSibling };
+      if (FLOW_CELLS.has(node.tagName)) return { parent: node, nextSibling: null };
+      node = parent;
+    }
+    return { parent: doc.body, nextSibling: null };
+  }
+
+  function insertImage(file) {
+    const doc = previewFrame.contentDocument;
+    if (mode !== 'edit' || !doc || !doc.body) return;
+
+    const asset = imageAssetFor(file, guessImageDir(doc));
+    const image = doc.createElement('img');
+    image.setAttribute('src', asset.url);
+    image.setAttribute('alt', file.name.replace(/\.[^.]+$/, ''));
+    // 부모 영역보다 커지지 않고 원래 비율을 유지하도록 한다.
+    image.style.maxWidth = '100%';
+    image.style.height = 'auto';
+
+    const { parent, nextSibling } = imageInsertPoint(doc, selectedElement);
+    parent.insertBefore(image, nextSibling);
+
+    assignEditorIds(doc);
+    buildTree(doc);
+    pushStructuralHistory('insert', image, parent, nextSibling);
+    selectElement(image);
+    showToast(imageAddedMessage(asset, '추가했습니다'), 6000);
+  }
+
+  // 사진을 다 불러오면 true, 깨졌으면 false
+  function imageLoaded(img) {
+    if (img.complete) return Promise.resolve(img.naturalWidth > 0);
+    return new Promise((resolve) => {
+      img.addEventListener('load', () => resolve(true), { once: true });
+      img.addEventListener('error', () => resolve(false), { once: true });
+    });
+  }
+
+  // 사진만 바꾸고 칸 크기는 유지한다. 기존 칸의 비율을 aspect-ratio로 고정하고
+  // object-fit: cover로 새 사진을 칸에 맞춰 자른다. 원래 너비가 사진 자체 크기에서
+  // 나왔던 경우(새 사진을 넣으니 너비가 달라진 경우)에만 너비를 px로 고정한다.
+  async function replaceImage(el, file) {
+    const doc = previewFrame.contentDocument;
+    if (mode !== 'edit' || !doc || !el || !el.isConnected || el.tagName !== 'IMG') return;
+
+    const win = previewFrame.contentWindow;
+    const oldRef = originalRef(el.getAttribute('src'));
+    const asset = imageAssetFor(file, isRelativeRef(oldRef) ? dirOf(oldRef) : guessImageDir(doc));
+
+    const before = snapshotAttrs(el, IMAGE_ATTRS);
+    const cs = win.getComputedStyle(el);
+    const oldW = parseFloat(cs.width);
+    const oldH = parseFloat(cs.height);
+    const oldMaxWidth = cs.maxWidth;
+    const hadInlineWidth = !!el.style.width;
+    // 기존 사진이 깨져 있으면(파일만 연 경우 등) 칸 크기를 믿을 수 없다.
+    const keepBox = el.complete && el.naturalWidth > 0 && oldW > 0 && oldH > 0;
+
+    // srcset이 있으면 브라우저가 src 대신 그쪽을 쓰므로 함께 걷어낸다.
+    el.removeAttribute('srcset');
+    el.removeAttribute('sizes');
+    if (keepBox) {
+      el.style.setProperty('aspect-ratio', `${Math.round(oldW * 100) / 100} / ${Math.round(oldH * 100) / 100}`);
+      el.style.setProperty('object-fit', 'cover');
+    } else if (oldMaxWidth === 'none') {
+      el.style.setProperty('max-width', '100%');
+    }
+    el.setAttribute('src', asset.url);
+
+    pushHistory(el, 'image', 'attrs', before, snapshotAttrs(el, IMAGE_ATTRS));
+    const entry = history[historyIndex];
+    syncPanel(el);
+
+    if (el.parentNode && el.parentNode.tagName === 'PICTURE' && el.parentNode.querySelector('source')) {
+      showToast('<picture> 안의 <source>가 우선 적용되어 화면에는 이전 사진이 보일 수 있습니다.', 6000);
+    } else {
+      showToast(imageAddedMessage(asset, '바꿨습니다'), 6000);
+    }
+
+    if (!keepBox || hadInlineWidth) return;
+    if (!(await imageLoaded(el))) return; // 읽을 수 없는 사진이면 크기 비교를 하지 않는다.
+    // 그사이 되돌리기나 다른 편집이 있었다면 손대지 않는다.
+    if (history[historyIndex] !== entry || el.getAttribute('src') !== asset.url) return;
+    if (Math.abs(parseFloat(win.getComputedStyle(el).width) - oldW) <= 1) return;
+
+    el.style.setProperty('width', `${Math.round(oldW)}px`);
+    // 좁은 화면에서 칸 밖으로 넘치지 않도록 (사이트 CSS에 이미 제한이 있으면 그대로 둔다)
+    if (oldMaxWidth === 'none') el.style.setProperty('max-width', '100%');
+    entry.after = snapshotAttrs(el, IMAGE_ATTRS);
+    if (selectedElement === el) syncPanel(el);
+  }
+
+  /* --- 사진 위치: 순서 이동 / 정렬 ------------------------------ */
+
+  const imagePositionGroup = document.getElementById('image-position-group');
+  const moveUpBtn = document.getElementById('move-up-btn');
+  const moveDownBtn = document.getElementById('move-down-btn');
+  const imageAlignButtons = Array.from(document.querySelectorAll('[data-image-align]'));
+  const imageAlignNotice = document.getElementById('image-align-notice');
+
+  // 정렬은 display: block + 좌우 margin으로 만든다. (자유 배치는 쓰지 않는다)
+  const IMAGE_ALIGN = {
+    left: { 'margin-left': '0px', 'margin-right': 'auto' },
+    center: { 'margin-left': 'auto', 'margin-right': 'auto' },
+    right: { 'margin-left': 'auto', 'margin-right': '0px' }
+  };
+
+  // 요소를 옮겨 DOM 순서를 바꾼다. 같은 자리면 아무것도 하지 않는다.
+  function moveElement(el, to) {
+    const doc = previewFrame.contentDocument;
+    if (mode !== 'edit' || !doc || !el || !el.isConnected || !to || sameSpot(el, to)) return false;
+
+    const from = { parent: el.parentNode, nextSibling: el.nextSibling };
+    to.parent.insertBefore(el, to.nextSibling);
+    pushMoveHistory(el, from, { parent: to.parent, nextSibling: to.nextSibling });
+
+    buildTree(doc);
+    highlightTreeNode();
+    if (selectedElement === el) syncPanel(el);
+    return true;
+  }
+
+  // 편집 대상인 바로 앞/뒤 형제 요소 (script·style·br 등은 건너뛴다)
+  function editableSibling(el, dir) {
+    const step = (n) => (dir < 0 ? n.previousElementSibling : n.nextElementSibling);
+    let n = step(el);
+    while (n && !n.hasAttribute('data-editor-id')) n = step(n);
+    return n;
+  }
+
+  // ↑/↓ 한 칸 이동할 자리. 형제 끝에 닿으면 감싸는 요소 밖으로 나간다.
+  function stepTarget(el, dir) {
+    const sib = editableSibling(el, dir);
+    if (sib) return { parent: el.parentNode, nextSibling: dir < 0 ? sib : sib.nextSibling };
+    const parent = el.parentElement;
+    if (!parent || !parent.hasAttribute('data-editor-id')) return null;
+    return placementOutside(el.ownerDocument, parent, dir < 0 ? 'before' : 'after');
+  }
+
+  // 가로로 나열된 flex 안에서는 좌우 margin: auto가 옆 요소들까지 밀어내므로 정렬을 막는다.
+  function inHorizontalFlex(el) {
+    const parent = el.parentElement;
+    if (!parent) return false;
+    const pcs = previewFrame.contentWindow.getComputedStyle(parent);
+    return pcs.display.includes('flex') && pcs.flexDirection.startsWith('row');
+  }
+
+  function currentImageAlign(el) {
+    if (el.style.display !== 'block') return null;
+    return Object.keys(IMAGE_ALIGN).find((key) =>
+      el.style.marginLeft === IMAGE_ALIGN[key]['margin-left'] &&
+      el.style.marginRight === IMAGE_ALIGN[key]['margin-right']) || null;
+  }
+
+  function syncImagePosition(el) {
+    moveUpBtn.disabled = !stepTarget(el, -1);
+    moveDownBtn.disabled = !stepTarget(el, 1);
+    const blocked = inHorizontalFlex(el);
+    const align = currentImageAlign(el);
+    imageAlignButtons.forEach((btn) => {
+      const active = btn.dataset.imageAlign === align;
+      // 정렬해 둔 사진을 가로 영역으로 옮긴 경우에도 해제는 할 수 있게 켜 둔다.
+      btn.disabled = blocked && !active;
+      btn.classList.toggle('is-active', active);
+    });
+    imageAlignNotice.hidden = !blocked;
+  }
+
+  moveUpBtn.addEventListener('click', () => {
+    if (selectedElement) moveElement(selectedElement, stepTarget(selectedElement, -1));
+  });
+  moveDownBtn.addEventListener('click', () => {
+    if (selectedElement) moveElement(selectedElement, stepTarget(selectedElement, 1));
+  });
+
+  imageAlignButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const el = selectedElement;
+      if (!el || el.tagName !== 'IMG') return;
+      const key = btn.dataset.imageAlign;
+      const isActive = currentImageAlign(el) === key;
+      if (!isActive && inHorizontalFlex(el)) return;
+      commit('image-align', () => {
+        if (isActive) {
+          // 같은 버튼을 다시 누르면 정렬 지정을 해제한다.
+          ['display', 'margin-left', 'margin-right'].forEach((prop) => rawApply(prop, ''));
+          // 남은 스타일이 없으면 빈 style="" 도 남기지 않는다.
+          if (!el.getAttribute('style')) el.removeAttribute('style');
+          return;
+        }
+        rawApply('display', 'block');
+        Object.entries(IMAGE_ALIGN[key]).forEach(([prop, value]) => rawApply(prop, value));
+      });
+      lastCommitTime = 0; // 버튼 클릭은 한 번씩 따로 되돌릴 수 있도록 합치지 않는다.
+      syncPanel(el);
+    });
+  });
+
+  // 검증용
+  window.FrontEndEditor.moveElement = moveElement;
+  window.FrontEndEditor.dropPointAt = (x, y) =>
+    dropPointAt(previewFrame.contentDocument, selectedElement, x, y);
+
+  function openImagePicker(action) {
+    if (mode !== 'edit' || !previewFrame.contentDocument) return;
+    imageAction = action;
+    imageInput.click();
+  }
+
+  insertImageBtn.addEventListener('click', () => {
+    setMode('edit');
+    openImagePicker('insert');
+  });
+  replaceImageBtn.addEventListener('click', () => openImagePicker('replace'));
+
+  imageInput.addEventListener('change', () => {
+    const [file] = imageInput.files || [];
+    imageInput.value = ''; // 같은 파일을 다시 골라도 change가 일어나도록
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      showToast('이미지 파일을 선택해주세요.');
+      return;
+    }
+    if (imageAction === 'replace') replaceImage(selectedElement, file);
+    else insertImage(file);
+  });
+
+  // 검증용: 파일 선택 창 없이 File 객체로 사진 추가·바꾸기를 호출할 수 있게 노출
+  window.FrontEndEditor.insertImage = insertImage;
+  window.FrontEndEditor.replaceImage = (file) => replaceImage(selectedElement, file);
+
+  // 내보낸 HTML 옆에 복사해야 하는 새 사진 경로 (되돌려서 사라진 사진은 빼고)
+  function pendingImageCopies(doc) {
+    const paths = new Set();
+    doc.querySelectorAll('img[src]').forEach((img) => {
+      const asset = insertedAssets.get(img.getAttribute('src'));
+      if (asset && asset.needsCopy) paths.add(fromUrlPath(asset.ref));
+    });
+    return Array.from(paths);
+  }
+
+  /* ---------------------------------------------------------------
    * 편집 모드 / 보기 모드
    * ------------------------------------------------------------- */
 
@@ -1826,6 +2428,17 @@
     a.remove();
     URL.revokeObjectURL(url);
 
+    // 미리보기 전용 주소가 남으면 그 사진은 내보낸 파일에서 보이지 않는다.
+    if (html.includes(`blob:${location.origin}/`)) {
+      showToast(`내보내기 완료: ${name}. 경로로 바꾸지 못한 임시 주소(blob:)가 남아 있어 일부 사진이 보이지 않을 수 있습니다.`, 8000);
+      return;
+    }
+    const copies = pendingImageCopies(doc);
+    if (copies.length) {
+      showToast(`내보내기 완료: ${name}. 새 사진 ${copies.length}개를 HTML 기준 다음 위치에 복사하세요: ` +
+        copies.slice(0, 3).join(', ') + (copies.length > 3 ? ' …' : ''), 10000);
+      return;
+    }
     showToast(`내보내기 완료: ${name}`);
   });
 
