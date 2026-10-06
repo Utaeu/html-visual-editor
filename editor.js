@@ -61,12 +61,12 @@
     style.id = EDITOR_STYLE_ID;
     style.textContent = `
       .${HOVER_CLASS} {
-        outline: 1px solid #3b82f6 !important;
+        outline: 1px solid rgba(0, 113, 227, 0.6) !important;
         outline-offset: -1px !important;
         cursor: pointer !important;
       }
       .${SELECTED_CLASS} {
-        outline: 2px solid #ef4444 !important;
+        outline: 2px solid #0071e3 !important;
         outline-offset: -1px !important;
       }
       .${SELECTED_CLASS} {
