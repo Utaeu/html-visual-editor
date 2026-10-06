@@ -39,7 +39,7 @@ HTML Visual Editor: `index.html` 파일을 불러와 텍스트·색상·레이�
 ` ↔ `<br>`을 변환한다(`pre` 계열 white-space 요소는 `
 ` 그대로). 소스 들여쓰기에서 온 줄바꿈·공백은 읽을 때 공백 하나로 정리한다. 'text' 히스토리 항목은 `innerHTML` 스냅샷이다. `<br>`/`<wbr>`에는 편집 ID를 붙이지 않아 트리·선택 대상에서 빠진다.
 - 텍스트 입력 칸에 포커스가 있으면 단축키(`Ctrl+Z/Y/D`, `Delete`)를 무시한다(`isTextEntryTarget`).
-- 요소 트리 접기: `#tree-pane.is-collapsed`(기본 접힘). 상태는 `localStorage['html-visual-editor:tree-collapsed']`에 저장하며, 접근이 막혀도 동작하도록 try/catch로 감싼다.
+- 요소 트리 접기: `#tree-pane.is-collapsed`(기본 접힘). 머리(`.tree-pane__head`, 접기 버튼)는 고정이고 `#tree`만 스크롤된다. 상태는 `localStorage['html-visual-editor:tree-collapsed']`에 저장하며, 접근이 막혀도 동작하도록 try/catch로 감싼다.
 - `window.FrontEndEditor`: 선택 요소·미리보기 문서 접근자와 `buildCleanHtml` 등을 노출한다(검증용).
 
 ## 확인 방법

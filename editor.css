@@ -382,16 +382,25 @@ input:focus-visible {
   flex-shrink: 0;
   border-right: 1px solid var(--hairline-soft);
   background: var(--canvas);
-  padding: 20px 12px;
-  overflow: auto;
+  /* 머리(제목·접기 버튼)는 고정하고, 아래 트리 목록만 스크롤한다(엑셀 틀 고정처럼). */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .tree-pane__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
-  padding: 0 4px;
+  flex-shrink: 0;
+  padding: 20px 16px 12px;
+}
+
+.tree {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 12px 20px;
 }
 
 .tree-pane__title {
@@ -437,6 +446,7 @@ input:focus-visible {
 }
 
 .tree-pane.is-collapsed .tree-pane__head {
+  flex: 1;
   height: 100%;
   margin: 0;
   padding: 0;
