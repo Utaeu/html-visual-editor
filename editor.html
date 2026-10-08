@@ -345,6 +345,17 @@
     </aside>
   </main>
 
+  <!-- 내보내기 전 확인: 원본 파일과 비교해 바뀐 줄만 보여 준다. -->
+  <dialog class="export-dialog" id="export-dialog" aria-labelledby="export-dialog-title">
+    <h2 class="export-dialog__title" id="export-dialog-title">저장 전 확인</h2>
+    <p class="export-dialog__summary" id="export-summary"></p>
+    <pre class="export-dialog__diff" id="export-diff"></pre>
+    <div class="export-dialog__actions">
+      <button type="button" class="btn btn--secondary" id="export-cancel">취소</button>
+      <button type="button" class="btn btn--export" id="export-confirm">다운로드</button>
+    </div>
+  </dialog>
+
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
   <!-- 드래그 범위 선택 사각형. 미리보기 문서를 건드리지 않도록 편집기 쪽에 그린다. -->
   <div class="drag-box" id="drag-box" hidden></div>

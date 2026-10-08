@@ -988,6 +988,89 @@ input:focus-visible {
   display: block;
   width: 100%;
 }
+
+/* ───────────── 저장 전 확인 창 ───────────── */
+
+.export-dialog {
+  width: min(880px, calc(100vw - 32px));
+  max-height: calc(100vh - 64px);
+  padding: 24px;
+  border: none;
+  border-radius: var(--radius-lg);
+  background: var(--canvas);
+  color: var(--ink);
+  flex-direction: column;
+  gap: 12px;
+}
+
+.export-dialog[open] {
+  display: flex;
+}
+
+.export-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.32);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+
+.export-dialog__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+}
+
+.export-dialog__summary {
+  margin: 0;
+  font-size: 14px;
+  letter-spacing: -0.224px;
+  line-height: 1.43;
+  color: var(--ink-80);
+}
+
+.export-dialog__diff {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 10px 0;
+  overflow: auto;
+  border-radius: var(--radius-md);
+  background: var(--parchment);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.diff-row {
+  display: block;
+  padding: 0 14px;
+  white-space: pre;
+}
+
+.diff-row--del {
+  background: #fde8ea;
+  color: #8a0010;
+}
+
+.diff-row--add {
+  background: #e3f4e8;
+  color: #0b5c25;
+}
+
+.diff-row--ctx {
+  color: var(--ink-48);
+}
+
+.diff-row--gap {
+  color: var(--ink-30);
+}
+
+.export-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
 </style>
 </head>
 <body>
@@ -1329,6 +1412,17 @@ input:focus-visible {
     </aside>
   </main>
 
+  <!-- 내보내기 전 확인: 원본 파일과 비교해 바뀐 줄만 보여 준다. -->
+  <dialog class="export-dialog" id="export-dialog" aria-labelledby="export-dialog-title">
+    <h2 class="export-dialog__title" id="export-dialog-title">저장 전 확인</h2>
+    <p class="export-dialog__summary" id="export-summary"></p>
+    <pre class="export-dialog__diff" id="export-diff"></pre>
+    <div class="export-dialog__actions">
+      <button type="button" class="btn btn--secondary" id="export-cancel">취소</button>
+      <button type="button" class="btn btn--export" id="export-confirm">다운로드</button>
+    </div>
+  </dialog>
+
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
   <!-- 드래그 범위 선택 사각형. 미리보기 문서를 건드리지 않도록 편집기 쪽에 그린다. -->
   <div class="drag-box" id="drag-box" hidden></div>
@@ -1364,22 +1458,463 @@ input:focus-visible {
   // 편집 내용을 되살리는 복구 지점으로 쓴다.
   let lastGoodHtml = null;
 
+  /* ---------------------------------------------------------------
+   * 원본 소스 모델 — 저장 결과 = 원본 텍스트 + 사용자가 바꾼 부분만
+   *
+   * 미리보기는 페이지 스크립트가 실행된 살아 있는 DOM이다. 그대로 직렬화하면
+   * 스크립트가 만든 메뉴·버튼, 창 크기로 정해진 속성, 실행 중 상태가 파일에
+   * 박히고 doctype·속성 표기·줄바꿈까지 달라진다. 그래서 파일을 열 때 원본
+   * 텍스트를 태그 단위 조각 트리(model)로 들고, 원본의 모든 여는 태그에
+   * data-src-id를 붙여 미리보기에 넣는다. 내보낼 때는 model의 조각을 그대로
+   * 이어 붙이고, 사용자가 바꾼 요소의 여는 태그(style 등)와 내용만 고쳐 쓴다.
+   * data-src-id가 없는 요소는 스크립트가 만든 것이므로 편집 대상에서 뺀다.
+   *
+   * model 노드:
+   *   { kind: 'root', children }
+   *   { kind: 'el', id, name, startTag, nameEnd, attrs, endTag, children, parent, inTemplate }
+   *   { kind: 'text', text }           원본 글자·주석·doctype 등 (바꾸지 않는 조각)
+   *   { kind: 'new', id, parent }      사진 추가로 새로 넣은 요소 (내보낼 때 DOM에서 직렬화)
+   * ------------------------------------------------------------- */
+
+  const SRC_ID_ATTR = 'data-src-id';
+  const VOID_ELEMENTS = new Set([
+    'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'keygen', 'link', 'meta',
+    'param', 'source', 'track', 'wbr'
+  ]);
+  // 내용을 태그로 해석하지 않는 요소. 닫는 태그까지 통째로 글자로 본다.
+  const RAW_TEXT_ELEMENTS = new Set([
+    'script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript'
+  ]);
+  // 이 여는 태그가 나오면 열려 있던 <p>가 저절로 닫힌다.
+  const P_CLOSERS = new Set([
+    'address', 'article', 'aside', 'blockquote', 'details', 'dialog', 'div', 'dl', 'fieldset',
+    'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header',
+    'hgroup', 'hr', 'li', 'dd', 'dt', 'main', 'menu', 'nav', 'ol', 'p', 'pre', 'section',
+    'table', 'ul'
+  ]);
+  const SCOPE_BOUNDARY = new Set([
+    'html', 'table', 'td', 'th', 'caption', 'button', 'template', 'object', 'marquee',
+    'applet', 'svg', 'math'
+  ]);
+  const HEAD_CONTENT = new Set(['meta', 'link', 'title', 'style', 'script', 'base', 'noscript', 'template']);
+
+  // 지금 연 문서의 원본. { text, bom, eol, brTag, root, byId, nextClone, nextNew }
+  let source = null;
+  // 사용자가 바꾼 것. data-src-id → { style: Set(속성), attrs: Set(이름), textBaseline }
+  // 값은 기록하지 않고 내보낼 때 미리보기에서 읽는다. (되돌리기와 자연히 맞물린다)
+  const edits = new Map();
+
+  // 여는 태그 하나를 읽는다. s[i] === '<' 이고 다음 글자는 영문자.
+  function readStartTag(s, i) {
+    const NAME_RE = /[a-zA-Z][^\s/>]*/y;
+    NAME_RE.lastIndex = i + 1;
+    const name = NAME_RE.exec(s)[0].toLowerCase();
+    const n = s.length;
+    let p = NAME_RE.lastIndex;
+    const nameEnd = p - i;
+    const attrs = [];
+    let selfClosing = false;
+    const isSpace = (c) => c === ' ' || c === '\n' || c === '\t' || c === '\r' || c === '\f';
+
+    while (p < n) {
+      const c = s[p];
+      if (c === '>') return { end: p + 1, name, nameEnd, attrs, selfClosing };
+      if (isSpace(c)) { p += 1; continue; }
+      if (c === '/') {
+        if (s[p + 1] === '>') {
+          selfClosing = true;
+          return { end: p + 2, name, nameEnd, attrs, selfClosing };
+        }
+        p += 1;
+        continue;
+      }
+      // 속성 이름 (첫 글자는 '='여도 이름에 포함된다)
+      const aStart = p;
+      p += 1;
+      while (p < n && !isSpace(s[p]) && s[p] !== '/' && s[p] !== '>' && s[p] !== '=') p += 1;
+      const attr = {
+        name: s.slice(aStart, p).toLowerCase(),
+        start: aStart - i, end: p - i, valueStart: -1, valueEnd: -1, quote: ''
+      };
+      let q = p;
+      while (q < n && isSpace(s[q])) q += 1;
+      if (s[q] === '=') {
+        q += 1;
+        while (q < n && isSpace(s[q])) q += 1;
+        const qc = s[q];
+        if (qc === '"' || qc === "'") {
+          const close = s.indexOf(qc, q + 1);
+          const ve = close < 0 ? n : close;
+          attr.valueStart = q + 1 - i;
+          attr.valueEnd = ve - i;
+          attr.quote = qc;
+          p = close < 0 ? n : close + 1;
+        } else {
+          let ve = q;
+          while (ve < n && !isSpace(s[ve]) && s[ve] !== '>') ve += 1;
+          attr.valueStart = q - i;
+          attr.valueEnd = ve - i;
+          p = ve;
+        }
+        attr.end = p - i;
+      }
+      attrs.push(attr);
+    }
+    return { end: n, name, nameEnd, attrs, selfClosing };
+  }
+
+  // 원본 텍스트 → model. 모든 글자가 정확히 한 조각에 들어가므로
+  // 조각을 그대로 이어 붙이면 원본과 한 글자도 다르지 않다.
+  function parseSourceModel(text) {
+    const root = { kind: 'root', children: [], parent: null };
+    const byId = new Map();
+    const stack = [root];
+    const n = text.length;
+    let nextId = 1;
+    let textStart = 0;
+    let i = 0;
+    let brTag = null;
+
+    const top = () => stack[stack.length - 1];
+    const flushText = (upTo) => {
+      if (upTo > textStart) top().children.push({ kind: 'text', text: text.slice(textStart, upTo) });
+      textStart = upTo;
+    };
+    const inForeign = () => stack.some((el) => el.name === 'svg' || el.name === 'math');
+    // names 중 하나가 boundary보다 위에 열려 있으면 그것과 그 위를 모두 닫는다(닫는 태그 없이).
+    const closeOpen = (names, boundary) => {
+      for (let k = stack.length - 1; k > 0; k -= 1) {
+        if (names.has(stack[k].name)) {
+          stack.length = k;
+          return;
+        }
+        if (boundary.has(stack[k].name)) return;
+      }
+    };
+
+    while (i < n) {
+      const lt = text.indexOf('<', i);
+      if (lt < 0) break;
+      i = lt;
+      const next = text[i + 1] || '';
+
+      if (text.startsWith('<!--', i)) {
+        const e = text.indexOf('-->', i + 4);
+        i = e < 0 ? n : e + 3;
+        continue; // 주석은 글자 조각에 그대로 포함된다.
+      }
+      if (next === '!' || next === '?') {
+        const close = text.startsWith('<![CDATA[', i) ? ']]>' : '>';
+        const e = text.indexOf(close, i + 2);
+        i = e < 0 ? n : e + close.length;
+        continue;
+      }
+      if (next === '/' && /[a-zA-Z]/.test(text[i + 2] || '')) {
+        const e = text.indexOf('>', i);
+        const end = e < 0 ? n : e + 1;
+        const name = /^<\/([a-zA-Z][^\s/>]*)/.exec(text.slice(i, Math.min(end, i + 100)))[1].toLowerCase();
+        let k = stack.length - 1;
+        while (k > 0 && stack[k].name !== name) k -= 1;
+        if (k > 0) {
+          flushText(i);
+          stack[k].endTag = text.slice(i, end);
+          stack.length = k;
+          textStart = end;
+        }
+        // 짝이 없는 닫는 태그는 글자 조각으로 남긴다.
+        i = end;
+        continue;
+      }
+      if (!/[a-zA-Z]/.test(next)) {
+        i += 1;
+        continue;
+      }
+
+      const tag = readStartTag(text, i);
+      flushText(i);
+      const foreign = inForeign();
+      const name = tag.name;
+
+      // 닫는 태그를 생략할 수 있는 요소들: 다음 태그가 나오면 저절로 닫힌다.
+      if (!foreign) {
+        if (top().name === 'head' && !HEAD_CONTENT.has(name)) stack.length -= 1;
+        if (P_CLOSERS.has(name)) closeOpen(new Set(['p']), SCOPE_BOUNDARY);
+        if (name === 'li') closeOpen(new Set(['li']), new Set(['ul', 'ol', 'menu', ...SCOPE_BOUNDARY]));
+        if (name === 'dt' || name === 'dd') closeOpen(new Set(['dt', 'dd']), new Set(['dl', ...SCOPE_BOUNDARY]));
+        if (name === 'option' && top().name === 'option') stack.length -= 1;
+        if (name === 'optgroup') closeOpen(new Set(['option', 'optgroup']), new Set(['select']));
+        if (name === 'tr') closeOpen(new Set(['tr']), new Set(['table', 'thead', 'tbody', 'tfoot']));
+        if (name === 'td' || name === 'th') closeOpen(new Set(['td', 'th']), new Set(['tr', 'table']));
+        if (name === 'thead' || name === 'tbody' || name === 'tfoot') {
+          closeOpen(new Set(['thead', 'tbody', 'tfoot']), new Set(['table']));
+        }
+        if (name === 'body') closeOpen(new Set(['head']), new Set());
+      }
+
+      const parent = top();
+      const el = {
+        kind: 'el',
+        id: String(nextId),
+        name,
+        startTag: text.slice(i, tag.end),
+        nameEnd: tag.nameEnd,
+        attrs: tag.attrs,
+        endTag: '',
+        children: [],
+        parent,
+        inTemplate: !!(parent.inTemplate || parent.name === 'template')
+      };
+      nextId += 1;
+      parent.children.push(el);
+      byId.set(el.id, el);
+      if (name === 'br' && !brTag && !tag.attrs.length) brTag = el.startTag;
+      i = tag.end;
+      textStart = i;
+
+      if (VOID_ELEMENTS.has(name) || (foreign && tag.selfClosing)) continue;
+      stack.push(el);
+
+      if (RAW_TEXT_ELEMENTS.has(name) && (!foreign || name === 'script' || name === 'style')) {
+        const closeRe = new RegExp(`</${name}(?=[\\s/>])`, 'gi');
+        closeRe.lastIndex = i;
+        const m = closeRe.exec(text);
+        i = m ? m.index : n;
+        flushText(i);
+      }
+    }
+    flushText(n);
+
+    return {
+      text,
+      root,
+      byId,
+      brTag: brTag || '<br>',
+      eol: text.includes('\r\n') ? '\r\n' : '\n',
+      bom: '',
+      nextClone: 1,
+      nextNew: 1
+    };
+  }
+
+  // model → 문자열. marked면 원본 요소마다 data-src-id 표식을 넣는다(미리보기용).
+  function renderModel(node, marked, out = []) {
+    node.children.forEach((c) => {
+      if (c.kind === 'text') {
+        out.push(c.text);
+      } else if (c.kind === 'el') {
+        out.push(marked
+          ? `${c.startTag.slice(0, c.nameEnd)} ${SRC_ID_ATTR}="${c.id}"${c.startTag.slice(c.nameEnd)}`
+          : c.startTag);
+        renderModel(c, marked, out);
+        out.push(c.endTag);
+      }
+    });
+    return out;
+  }
+
+  // 파일 → 글자. 맨 앞 BOM은 따로 들고 있다가 저장할 때 그대로 붙인다.
+  async function readSourceText(file) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const text = new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes);
+    return text.charCodeAt(0) === 0xFEFF
+      ? { text: text.slice(1), bom: '﻿' }
+      : { text, bom: '' };
+  }
+
+  // 원본을 model로 만들고, 표식을 붙인 미리보기용 HTML을 돌려준다.
+  function prepareSource(text, bom) {
+    source = parseSourceModel(text);
+    source.bom = bom;
+    if (renderModel(source.root, false).join('') !== text) {
+      // 구조상 일어나지 않아야 한다. 일어나면 저장 결과를 믿을 수 없으므로 알린다.
+      console.error('[editor] 원본 조각을 이어 붙인 결과가 원본과 다릅니다.');
+      showToast('이 파일은 원본 그대로 저장하지 못할 수 있습니다. 내보내기 전 확인 창을 꼭 살펴보세요.', 8000);
+    }
+    return renderModel(source.root, true).join('');
+  }
+
+  function modelOf(el) {
+    if (!source || !el || el.nodeType !== 1) return null;
+    const id = el.getAttribute(SRC_ID_ATTR);
+    return id ? source.byId.get(id) || null : null;
+  }
+
+  // 지워졌거나 옮겨지기 전 자리의 노드인지 거슬러 올라가며 확인한다.
+  function isModelAttached(node) {
+    let n = node;
+    while (n && n.kind !== 'root') {
+      if (!n.parent || !n.parent.children.includes(n)) return false;
+      n = n.parent;
+    }
+    return !!n;
+  }
+
+  function editInfo(el) {
+    const id = el && el.getAttribute(SRC_ID_ATTR);
+    if (!id || !source || !source.byId.has(id)) return null;
+    if (!edits.has(id)) edits.set(id, { style: new Set(), attrs: new Set(), textBaseline: undefined });
+    return edits.get(id);
+  }
+
+  function noteStyleEdit(el, prop) {
+    const info = editInfo(el);
+    if (info) info.style.add(prop);
+  }
+
+  function noteAttrEdit(el, name) {
+    const info = editInfo(el);
+    if (info) info.attrs.add(name);
+  }
+
+  // 처음 고칠 때의 내용을 기준으로 잡아 둔다. 내보낼 때 이것과 같으면 손대지 않는다.
+  function noteTextEdit(el) {
+    const info = editInfo(el);
+    if (info && info.textBaseline === undefined) info.textBaseline = readEditableText(el);
+  }
+
+  /* --- 구조 변경(복제·삭제·이동·사진 추가)을 model에 반영 ------------ */
+
+  // 자식 목록 스냅샷. 되돌리기·다시하기 때 이것으로 model을 되돌린다.
+  function snapshotChildren(parents) {
+    return Array.from(new Set(parents)).map((node) => ({ node, children: node.children.slice() }));
+  }
+
+  function restoreChildren(snaps) {
+    snaps.forEach(({ node, children }) => {
+      node.children = children.slice();
+      children.forEach((c) => { if (c.kind !== 'text') c.parent = node; });
+    });
+  }
+
+  const LINE_END_INDENT = /(\r?\n[ \t]*)$/;
+
+  // 노드를 뗀다. 혼자 한 줄을 차지하던 요소면 그 줄(들여쓰기·줄바꿈)도 함께 지운다.
+  function detachModel(node) {
+    const list = node.parent.children;
+    const i = list.indexOf(node);
+    if (i < 0) return;
+    list.splice(i, 1);
+    node.parent = null;
+    const prev = list[i - 1];
+    const next = list[i];
+    if (prev && next && prev.kind === 'text' && next.kind === 'text' &&
+        /\n[ \t]*$/.test(prev.text) && /^[ \t]*\r?\n/.test(next.text)) {
+      // 한 조각으로 합쳐 둬야 다음에 이 자리 옆에 넣을 때 들여쓰기를 찾을 수 있다.
+      list.splice(i - 1, 2, {
+        kind: 'text',
+        text: prev.text.replace(/[ \t]*$/, '') + next.text.replace(/^[ \t]*\r?\n/, '')
+      });
+    }
+  }
+
+  // ref 바로 뒤에 넣는다. ref가 한 줄을 차지했다면 같은 들여쓰기로 다음 줄에 둔다.
+  function insertModelAfter(node, ref) {
+    const list = ref.parent.children;
+    const i = list.indexOf(ref);
+    const prev = list[i - 1];
+    const m = prev && prev.kind === 'text' && prev.text.match(LINE_END_INDENT);
+    node.parent = ref.parent;
+    list.splice(i + 1, 0, ...(m ? [{ kind: 'text', text: m[1] }, node] : [node]));
+  }
+
+  // before 앞에 넣는다(before가 없으면 parent의 맨 끝).
+  function insertModel(node, parent, before) {
+    const list = parent.children;
+    const i = before ? list.indexOf(before) : -1;
+    if (i >= 0) {
+      const prev = list[i - 1];
+      const m = prev && prev.kind === 'text' && prev.text.match(LINE_END_INDENT);
+      node.parent = parent;
+      list.splice(i, 0, ...(m ? [node, { kind: 'text', text: m[1] }] : [node]));
+      return;
+    }
+    let last = list.length - 1;
+    while (last >= 0 && list[last].kind === 'text') last -= 1;
+    if (last >= 0) {
+      insertModelAfter(node, list[last]);
+    } else {
+      node.parent = parent;
+      list.push(node);
+    }
+  }
+
+  // 미리보기의 자리 { parent, nextSibling } → model의 자리 { parent, before }.
+  // 스크립트가 만든 형제는 건너뛰고, 다음 원본 요소 앞(없으면 부모 끝)으로 잡는다.
+  function modelSpotFor(domParent, domNext, moving) {
+    for (let n = domNext; n; n = n.nextSibling) {
+      const m = n.nodeType === 1 ? modelOf(n) : null;
+      if (m && m !== moving && isModelAttached(m)) return { parent: m.parent, before: m };
+    }
+    for (let p = domParent; p && p.nodeType === 1; p = p.parentNode) {
+      const m = modelOf(p);
+      if (m && m.kind === 'el' && isModelAttached(m)) return { parent: m, before: null };
+    }
+    return null;
+  }
+
+  // 복제: model 하위 트리를 새 id로 복사하고, 원본에 해 둔 편집 기록도 함께 복사한다.
+  function cloneModel(node, idMap) {
+    const id = `c${source.nextClone}`;
+    source.nextClone += 1;
+    const copy = { ...node, id, parent: null };
+    idMap.set(node.id, id);
+    source.byId.set(id, copy);
+    const info = edits.get(node.id);
+    if (info) {
+      edits.set(id, { style: new Set(info.style), attrs: new Set(info.attrs), textBaseline: info.textBaseline });
+    }
+    if (node.kind === 'el') {
+      copy.children = node.children.map((c) => {
+        if (c.kind === 'text') return c;
+        const cc = cloneModel(c, idMap);
+        cc.parent = copy;
+        return cc;
+      });
+    }
+    return copy;
+  }
+
+  // 미리보기 복사본의 표식을 새 id로 바꾼다. 짝이 없는 것(스크립트가 넣은 것)은 지운다.
+  function remapCloneIds(domClone, idMap) {
+    [domClone, ...domClone.querySelectorAll(`[${SRC_ID_ATTR}]`)].forEach((e) => {
+      const old = e.getAttribute(SRC_ID_ATTR);
+      if (old === null) return;
+      if (idMap.has(old)) e.setAttribute(SRC_ID_ATTR, idMap.get(old));
+      else e.removeAttribute(SRC_ID_ATTR);
+    });
+  }
+
   function loadHtmlIntoPreview(htmlText) {
     dropzone.hidden = true;
     previewFrame.hidden = false;
     previewFrame.srcdoc = htmlText;
   }
 
+  // 원본 파일에 있던 요소(data-src-id)에만 편집 ID를 준다. 스크립트가 만든 요소는
+  // 저장할 곳이 없으므로 선택·트리 대상에서 빠진다.
   function assignEditorIds(doc) {
     // <br>은 '내용' 입력칸의 줄바꿈으로 다루므로 따로 선택·트리 대상이 되지 않게 한다.
     const excludedTags = new Set(['SCRIPT', 'STYLE', 'BR', 'WBR']);
     const body = doc.body;
     if (!body) return;
+    const seen = new Set();
 
     const walk = (node) => {
       for (const child of Array.from(node.children)) {
+        const id = child.getAttribute(SRC_ID_ATTR);
+        let mapped = false;
+        if (id !== null) {
+          const m = source ? source.byId.get(id) : null;
+          // 스크립트가 원본 요소를 복제하면 표식도 복사된다. 처음 것만 원본으로 본다.
+          // <template> 안의 원본을 찍어 낸 사본도 원본 자리가 아니므로 뺀다.
+          mapped = !!m && !m.inTemplate && !seen.has(id);
+          if (mapped) seen.add(id);
+          else child.removeAttribute(SRC_ID_ATTR);
+        }
         if (!excludedTags.has(child.tagName)) {
-          if (!child.hasAttribute('data-editor-id')) {
+          if (!mapped) {
+            child.removeAttribute('data-editor-id');
+          } else if (!child.hasAttribute('data-editor-id')) {
             editorIdCounter += 1;
             child.setAttribute('data-editor-id', `el-${editorIdCounter}`);
           }
@@ -1389,6 +1924,11 @@ input:focus-visible {
     };
 
     walk(body);
+  }
+
+  // 누른 곳에서 가장 가까운 편집 대상. 스크립트가 만든 요소를 누르면 감싸는 원본 요소.
+  function editableTarget(node) {
+    return node && node.nodeType === 1 ? node.closest('[data-editor-id]') : null;
   }
 
   // 하이라이트는 style 속성이 아닌 클래스로만 적용한다.
@@ -1691,7 +2231,8 @@ input:focus-visible {
 
     // 끌지 않고 뗐다면 평범한 클릭: 누른 안쪽 요소를 선택한다.
     if (!active) {
-      if (clickTarget !== el && isEditable(clickTarget)) selectElement(clickTarget);
+      const inner = editableTarget(clickTarget);
+      if (inner && inner !== el) selectElement(inner);
       return;
     }
     if (point && point.to) moveElement(el, point.to);
@@ -1840,7 +2381,7 @@ input:focus-visible {
   function attachSelectionHandlers(doc) {
     doc.addEventListener('mouseover', (e) => {
       if (mode !== 'edit' || drag || moveDrag) return;
-      setHovered(isEditable(e.target) ? e.target : null);
+      setHovered(editableTarget(e.target));
     }, true);
 
     doc.addEventListener('mouseout', (e) => {
@@ -1871,12 +2412,17 @@ input:focus-visible {
 
       if (e.button === 0) beginDrag(e, additive);
 
-      if (isEditable(e.target)) {
-        if (additive) toggleInSelection(e.target);
-        else selectElement(e.target);
+      const target = editableTarget(e.target);
+      if (target) {
+        if (additive) toggleInSelection(target);
+        else selectElement(target);
       } else if (!additive && (e.target === doc.body || e.target === doc.documentElement)) {
         // 빈 공간을 누르면 선택 해제
         selectElement(null);
+      } else if (e.button === 0 && !additive) {
+        // 원본 파일에 없는 요소(페이지 스크립트가 만든 메뉴·버튼 등)
+        selectElement(null);
+        showToast('페이지 스크립트가 만든 요소라 편집할 수 없습니다. (원본 파일에 없는 요소)');
       }
     }, true);
 
@@ -2178,16 +2724,6 @@ input:focus-visible {
     return `${serializeDoctype(doc)}\n${doc.documentElement.outerHTML}`;
   }
 
-  // 내보내기 직전: blob URL을 원래 적혀 있던 경로로 되돌린다.
-  function restoreAssetRefs(html) {
-    let out = html;
-    const swap = (url, raw) => { out = out.split(url).join(raw); };
-    if (project) project.reverse.forEach((raw, url) => swap(url, raw));
-    // 새로 넣은 사진은 속성값 안에 들어가므로 &만 이스케이프한다.
-    insertedAssets.forEach((asset, url) => swap(url, asset.ref.replace(/&/g, '&amp;')));
-    return out;
-  }
-
   function releaseInsertedAssets() {
     insertedAssets.forEach((_, url) => URL.revokeObjectURL(url));
     insertedAssets.clear();
@@ -2203,6 +2739,7 @@ input:focus-visible {
   function startDocument(name, html) {
     editorIdCounter = 0;
     originalFileName = name;
+    edits.clear();
     releaseInsertedAssets();
     loadHtmlIntoPreview(html);
   }
@@ -2216,17 +2753,18 @@ input:focus-visible {
       return;
     }
 
-    let text;
+    let read;
     try {
-      text = await file.text();
+      read = await readSourceText(file);
     } catch {
       alert('파일을 읽는 중 오류가 발생했습니다.');
       return;
     }
+    const { text } = read;
 
     releaseProject();
     fileNameLabel.textContent = file.name;
-    startDocument(file.name, text);
+    startDocument(file.name, prepareSource(text, read.bom));
 
     const refs = new Set();
     const probe = new DOMParser().parseFromString(text, 'text/html');
@@ -2280,7 +2818,9 @@ input:focus-visible {
     fileNameLabel.textContent = project.name ? `${project.name}/${path}` : path;
 
     project.missing.clear();
-    const doc = new DOMParser().parseFromString(await file.text(), 'text/html');
+    // 원본 텍스트는 source에 그대로 들고, 미리보기에는 표식을 붙이고 경로를 blob으로 바꾼 사본을 넣는다.
+    const { text, bom } = await readSourceText(file);
+    const doc = new DOMParser().parseFromString(prepareSource(text, bom), 'text/html');
     await rewriteDocRefs(doc, (raw) => htmlRefToUrl(dirOf(path), raw));
     startDocument(name, serializeParsed(doc));
 
@@ -2448,6 +2988,13 @@ input:focus-visible {
         reason: '하위 요소가 있어 직접 편집할 수 없습니다. 트리나 화면에서 하위 요소를 선택하세요.'
       };
     }
+    // 저장은 원본 텍스트를 고쳐 쓰는 방식이라, 원본에서 안쪽에 다른 태그가 있었다면
+    // (스크립트가 지운 경우 등) 내용을 바꿔 쓸 수 없다.
+    const m = modelOf(el);
+    if (!m || m.kind !== 'el' ||
+        m.children.some((c) => c.kind !== 'text' && !(c.kind === 'el' && (c.name === 'br' || c.name === 'wbr')))) {
+      return { editable: false, reason: '원본 파일에서는 이 요소 안에 다른 태그가 있어 내용을 직접 편집할 수 없습니다.' };
+    }
     return { editable: true, reason: '' };
   }
 
@@ -2507,6 +3054,7 @@ input:focus-visible {
     if (!el || !textEditState(el).editable) return;
 
     const before = el.innerHTML;
+    noteTextEdit(el);
     writeEditableText(el, textContentInput.value);
     pushHistory(el, 'text', 'text', before, el.innerHTML);
   });
@@ -2584,6 +3132,7 @@ input:focus-visible {
   function rawApply(prop, value) {
     const el = selectedElement;
     if (!el) return;
+    noteStyleEdit(el, prop);
     if (value === '' || value === null) {
       el.style.removeProperty(prop);
     } else {
@@ -2672,10 +3221,11 @@ input:focus-visible {
 
   // 복제·삭제처럼 DOM 구조를 바꾸는 동작. 값 비교나 병합 없이 항상 한 항목으로
   // 남기고, 되돌릴 때 필요한 삽입 위치(부모 + 기준 형제)를 함께 들고 있는다.
-  function pushStructuralHistory(type, el, parent, nextSibling) {
+  // model: 원본 model의 자식 목록 스냅샷 { before, after } (저장 결과를 함께 되돌린다)
+  function pushStructuralHistory(type, el, parent, nextSibling, model) {
     if (isRestoring) return;
     history.length = historyIndex + 1; // 되돌린 뒤 새로 편집하면 redo 이력은 폐기
-    history.push({ el, parent, nextSibling, type, key: null });
+    history.push({ el, parent, nextSibling, type, key: null, model });
     historyIndex = history.length - 1;
     lastCommitTime = 0; // 뒤이은 스타일 편집이 이 항목에 합쳐지지 않도록
     updateHistoryButtons();
@@ -2772,10 +3322,10 @@ input:focus-visible {
   }
 
   // 요소 순서 이동. 옮기기 전(from)과 후(to) 자리를 함께 남긴다.
-  function pushMoveHistory(el, from, to) {
+  function pushMoveHistory(el, from, to, model) {
     if (isRestoring) return;
     history.length = historyIndex + 1; // 되돌린 뒤 새로 편집하면 redo 이력은 폐기
-    history.push({ el, from, to, type: 'move', key: null });
+    history.push({ el, from, to, type: 'move', key: null, model });
     historyIndex = history.length - 1;
     lastCommitTime = 0;
     updateHistoryButtons();
@@ -2808,6 +3358,7 @@ input:focus-visible {
     if (historyIndex < 0) return;
     const entry = history[historyIndex];
     isRestoring = true;
+    if (entry.model) restoreChildren(entry.model.before);
 
     let focus;
     if (STRUCTURAL_TYPES.has(entry.type)) {
@@ -2831,6 +3382,7 @@ input:focus-visible {
     if (historyIndex >= history.length - 1) return;
     const entry = history[historyIndex + 1];
     isRestoring = true;
+    if (entry.model) restoreChildren(entry.model.after);
 
     let focus;
     if (STRUCTURAL_TYPES.has(entry.type)) {
@@ -2865,6 +3417,8 @@ input:focus-visible {
 
   function handleEditorKey(e) {
     if (isTextEntryTarget(e.target)) return;
+    // 저장 전 확인 창이 떠 있는 동안에는 편집 단축키(Delete 등)를 쓰지 않는다.
+    if (document.getElementById('export-dialog').open) return;
 
     if (e.ctrlKey || e.metaKey) {
       const key = e.key.toLowerCase();
@@ -3134,6 +3688,7 @@ input:focus-visible {
       before: el.getAttribute('style')
     }));
     items.forEach((it) => {
+      noteStyleEdit(it.el, 'font-size');
       it.el.style.setProperty('font-size', `${Math.max(1, compute(it.size))}px`);
       it.after = it.el.getAttribute('style');
       delete it.size;
@@ -3305,9 +3860,21 @@ input:focus-visible {
 
     const parent = el.parentNode;
     if (!parent) return;
+    const m = modelOf(el);
+    if (!m || !isModelAttached(m)) {
+      showToast('원본 파일에서 이 요소의 자리를 찾지 못해 복제할 수 없습니다.');
+      return;
+    }
 
     const clone = el.cloneNode(true);
     clearEditorMarks(clone);
+
+    // 저장될 원본에도 같은 자리에 같은 원본 코드를 복사해 넣는다.
+    // (화면의 복사본에는 스크립트가 채운 내용이 섞여 있을 수 있으므로 원본 코드를 쓴다)
+    const modelBefore = snapshotChildren([m.parent]);
+    const idMap = new Map();
+    insertModelAfter(cloneModel(m, idMap), m);
+    remapCloneIds(clone, idMap);
 
     // 원본 바로 뒤에 넣는다. (기준 형제는 되돌리기에도 쓰인다)
     const nextSibling = el.nextSibling;
@@ -3315,7 +3882,8 @@ input:focus-visible {
 
     assignEditorIds(doc);
     buildTree(doc);
-    pushStructuralHistory('insert', clone, parent, nextSibling);
+    pushStructuralHistory('insert', clone, parent, nextSibling,
+      { before: modelBefore, after: snapshotChildren([m.parent]) });
 
     // 바로 이어서 편집할 수 있도록 복사본을 선택 상태로 만든다.
     selectElement(clone);
@@ -3336,14 +3904,24 @@ input:focus-visible {
 
     const nextSibling = el.nextSibling;
     const label = `<${el.tagName.toLowerCase()}>`;
+    const m = modelOf(el);
+    if (!m || !isModelAttached(m)) {
+      showToast('원본 파일에서 이 요소의 자리를 찾지 못해 삭제할 수 없습니다.');
+      return;
+    }
 
     // 선택·hover 표식을 먼저 걷어내야 되살렸을 때 테두리가 남지 않는다.
     setHovered(null);
     selectElement(null);
     el.remove();
 
+    const modelParent = m.parent;
+    const modelBefore = snapshotChildren([modelParent]);
+    detachModel(m);
+
     buildTree(doc);
-    pushStructuralHistory('remove', el, parent, nextSibling);
+    pushStructuralHistory('remove', el, parent, nextSibling,
+      { before: modelBefore, after: snapshotChildren([modelParent]) });
 
     showToast(`${label} 요소를 삭제했습니다. Ctrl+Z로 되돌릴 수 있습니다.`);
   }
@@ -3355,7 +3933,7 @@ input:focus-visible {
    * 사진 추가 / 사진 바꾸기
    *
    * 사진은 HTML에 넣지 않고 경로(예: images/a.jpg)로 연결한다. 미리보기에서는
-   * 고른 파일을 blob URL로 보여 주고, 내보낼 때 restoreAssetRefs()가 그 URL을
+   * 고른 파일을 blob URL로 보여 주고, 내보낼 때 unblob()이 그 URL을
    * 경로로 바꾼다. 브라우저는 폴더에 파일을 쓸 수 없으므로 사진 파일 복사는
    * 사용자가 해야 하고, 복사할 목록은 추가할 때와 내보낼 때 알려 준다.
    * ------------------------------------------------------------- */
@@ -3489,11 +4067,25 @@ input:focus-visible {
     image.style.height = 'auto';
 
     const { parent, nextSibling } = imageInsertPoint(doc, selectedElement);
+    const spot = modelSpotFor(parent, nextSibling, null);
+    if (!spot) {
+      showToast('원본 파일에서 넣을 자리를 찾지 못했습니다. 다른 요소를 선택한 뒤 다시 시도하세요.');
+      return;
+    }
+    // 새 사진은 원본에 없던 요소라 내보낼 때 화면의 <img>를 그대로 적는다.
+    const node = { kind: 'new', id: `n${source.nextNew}`, parent: null };
+    source.nextNew += 1;
+    source.byId.set(node.id, node);
+    image.setAttribute(SRC_ID_ATTR, node.id);
+    const modelBefore = snapshotChildren([spot.parent]);
+    insertModel(node, spot.parent, spot.before);
+
     parent.insertBefore(image, nextSibling);
 
     assignEditorIds(doc);
     buildTree(doc);
-    pushStructuralHistory('insert', image, parent, nextSibling);
+    pushStructuralHistory('insert', image, parent, nextSibling,
+      { before: modelBefore, after: snapshotChildren([spot.parent]) });
     selectElement(image);
     showToast(imageAddedMessage(asset, '추가했습니다'), 6000);
   }
@@ -3527,6 +4119,8 @@ input:focus-visible {
     // 기존 사진이 깨져 있으면(파일만 연 경우 등) 칸 크기를 믿을 수 없다.
     const keepBox = el.complete && el.naturalWidth > 0 && oldW > 0 && oldH > 0;
 
+    ['src', 'srcset', 'sizes'].forEach((name) => noteAttrEdit(el, name));
+    ['aspect-ratio', 'object-fit', 'max-width', 'width'].forEach((prop) => noteStyleEdit(el, prop));
     // srcset이 있으면 브라우저가 src 대신 그쪽을 쓰므로 함께 걷어낸다.
     el.removeAttribute('srcset');
     el.removeAttribute('sizes');
@@ -3581,9 +4175,22 @@ input:focus-visible {
     const doc = previewFrame.contentDocument;
     if (mode !== 'edit' || !doc || !el || !el.isConnected || !to || sameSpot(el, to)) return false;
 
+    // 저장될 원본에서도 같은 자리로 옮긴다. 자리를 못 찾으면 화면도 바꾸지 않는다.
+    const m = modelOf(el);
+    const spot = m && isModelAttached(m) ? modelSpotFor(to.parent, to.nextSibling, m) : null;
+    if (!spot) {
+      showToast('원본 파일에서 이 자리를 찾지 못해 옮길 수 없습니다.');
+      return false;
+    }
+    const modelParents = [m.parent, spot.parent];
+    const modelBefore = snapshotChildren(modelParents);
+    detachModel(m);
+    insertModel(m, spot.parent, spot.before);
+
     const from = { parent: el.parentNode, nextSibling: el.nextSibling };
     to.parent.insertBefore(el, to.nextSibling);
-    pushMoveHistory(el, from, { parent: to.parent, nextSibling: to.nextSibling });
+    pushMoveHistory(el, from, { parent: to.parent, nextSibling: to.nextSibling },
+      { before: modelBefore, after: snapshotChildren(modelParents) });
 
     buildTree(doc);
     highlightTreeNode();
@@ -3837,25 +4444,391 @@ input:focus-visible {
     return `${out}>`;
   }
 
-  // 편집 중인 실제 DOM은 건드리지 않고, 사본에서 도구 전용 표식만 제거한다.
-  function buildCleanHtml(doc) {
-    const root = doc.documentElement.cloneNode(true);
+  /* ---------------------------------------------------------------
+   * 내보내기 결과 만들기: 원본 텍스트 + 사용자가 바꾼 부분만
+   *
+   * 미리보기 DOM을 직렬화하지 않는다. source.root의 원본 조각을 그대로 이어
+   * 붙이고, 편집 기록(edits)이 있는 요소만 여는 태그의 해당 속성과 안쪽 글자를
+   * 고쳐 쓴다. 값은 미리보기에서 읽되, 사용자가 건드린 속성만 읽으므로
+   * 스크립트가 바꾼 속성·클래스·내용은 따라오지 않는다.
+   * ------------------------------------------------------------- */
 
-    root.querySelectorAll('[data-editor-id]').forEach((el) => {
-      el.removeAttribute('data-editor-id');
+  const entityBox = document.createElement('textarea');
+
+  function decodeEntities(str) {
+    if (!str.includes('&')) return str;
+    entityBox.innerHTML = str;
+    return entityBox.value;
+  }
+
+  function escapeAttr(value, quote) {
+    const v = value.replace(/&/g, '&amp;');
+    return quote === "'" ? v.replace(/'/g, '&#39;') : v.replace(/"/g, '&quot;');
+  }
+
+  function escapeText(value) {
+    return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/ /g, '&nbsp;');
+  }
+
+  // 미리보기용 blob URL → 원래 적혀 있던 경로 (속성값 그대로, 이스케이프 전)
+  function unblob(value) {
+    let out = value;
+    const swap = (url, raw) => { out = out.split(url).join(raw); };
+    if (project) project.reverse.forEach((raw, url) => swap(url, raw));
+    insertedAssets.forEach((asset, url) => swap(url, asset.ref));
+    return out;
+  }
+
+  // 원본 여는 태그에 적힌 속성값 (속성이 없으면 null)
+  function originalAttr(node, name) {
+    const a = node.attrs.find((x) => x.name === name);
+    if (!a) return null;
+    return a.valueStart < 0 ? '' : decodeEntities(node.startTag.slice(a.valueStart, a.valueEnd));
+  }
+
+  // 여는 태그에서 바뀐 속성만 고쳐 쓴다. 다른 속성·공백·따옴표는 원문 그대로.
+  // changes: { 이름: 새 값 | null(지움) }
+  function patchStartTag(node, changes) {
+    const tag = node.startTag;
+    const ops = [];
+    Object.entries(changes).forEach(([name, value]) => {
+      const a = node.attrs.find((x) => x.name === name);
+      if (a && value === null) {
+        let from = a.start;
+        while (from > 0 && /\s/.test(tag[from - 1])) from -= 1;
+        ops.push({ start: from, end: a.end, text: '' });
+      } else if (a && a.quote) {
+        ops.push({ start: a.valueStart, end: a.valueEnd, text: escapeAttr(value, a.quote) });
+      } else if (a) {
+        const rawName = tag.slice(a.start, a.start + name.length);
+        ops.push({ start: a.start, end: a.end, text: `${rawName}="${escapeAttr(value, '"')}"` });
+      } else if (value !== null) {
+        const at = node.attrs.length ? node.attrs[node.attrs.length - 1].end : node.nameEnd;
+        ops.push({ start: at, end: at, text: ` ${name}="${escapeAttr(value, '"')}"` });
+      }
     });
-
-    root.querySelectorAll('[class]').forEach((el) => {
-      el.classList.remove(HOVER_CLASS, SELECTED_CLASS);
-      // 하이라이트 클래스만 있던 요소에 class="" 가 남지 않도록 정리
-      if (el.classList.length === 0) el.removeAttribute('class');
+    let out = tag;
+    ops.sort((x, y) => y.start - x.start).forEach((op) => {
+      out = out.slice(0, op.start) + op.text + out.slice(op.end);
     });
+    return out;
+  }
 
-    const injected = root.querySelector(`[id="${EDITOR_STYLE_ID}"]`);
-    if (injected) injected.remove();
+  // 원본 style에 사용자가 건드린 CSS 속성만 미리보기 값으로 덮어쓴다.
+  // 반환: 새 style 값 | null(style 속성 지움) | undefined(바뀐 것 없음)
+  function mergedStyle(node, el, props) {
+    const orig = originalAttr(node, 'style');
+    const box = document.createElement('div');
+    box.setAttribute('style', orig || '');
+    const base = box.style.cssText;
+    props.forEach((prop) => {
+      const v = el.style.getPropertyValue(prop);
+      if (v) box.style.setProperty(prop, v, el.style.getPropertyPriority(prop));
+      else box.style.removeProperty(prop);
+    });
+    const next = box.style.cssText;
+    if (next === base) return undefined;
+    if (next) return next;
+    return orig === null ? undefined : null;
+  }
 
-    // 폴더로 열었다면 blob URL로 바꿔 둔 경로를 원래 표기로 되돌린다.
-    return restoreAssetRefs(`${serializeDoctype(doc)}\n${root.outerHTML}\n`);
+  function attrChanges(node, el, info) {
+    const changes = {};
+    if (info.style.size) {
+      const v = mergedStyle(node, el, info.style);
+      if (v !== undefined) changes.style = v;
+    }
+    info.attrs.forEach((name) => {
+      const live = el.getAttribute(name);
+      const v = live === null ? null : unblob(live);
+      if (v !== originalAttr(node, name)) changes[name] = v;
+    });
+    return changes;
+  }
+
+  const PRE_LIKE = new Set(['pre', 'listing', 'textarea']);
+
+  // 원본 안쪽 글자를 '화면 글자'와 짝지은 조각들로 나눈다. readEditableText와 같은
+  // 규칙(엔티티 해석, 줄바꿈 낀 공백 정리, <br> → \n)을 따른다. 처리할 수 없는
+  // 태그가 섞여 있으면 null.
+  function textUnits(inner, keep, preLike) {
+    const units = [];
+    const n = inner.length;
+    let i = 0;
+    while (i < n) {
+      const c = inner[i];
+      if (c === '<') {
+        if (inner.startsWith('<!--', i)) {
+          const e = inner.indexOf('-->', i + 4);
+          const end = e < 0 ? n : e + 3;
+          units.push({ raw: inner.slice(i, end), vis: '' });
+          i = end;
+          continue;
+        }
+        const m = /^<([a-zA-Z]+)\b[^>]*>/.exec(inner.slice(i, i + 200));
+        const name = m && m[1].toLowerCase();
+        if (name === 'br') units.push({ raw: m[0], vis: '\n', hard: true });
+        else if (name === 'wbr') units.push({ raw: m[0], vis: '' });
+        else return null;
+        i += m[0].length;
+        continue;
+      }
+      if (c === '&') {
+        const m = /^&(?:#[0-9]+;?|#[xX][0-9a-fA-F]+;?|[a-zA-Z][a-zA-Z0-9]*;?)/.exec(inner.slice(i, i + 40));
+        if (m) {
+          units.push({ raw: m[0], vis: decodeEntities(m[0]) });
+          i += m[0].length;
+          continue;
+        }
+      }
+      if (c === '\r') {
+        const raw = inner[i + 1] === '\n' ? '\r\n' : '\r';
+        units.push({ raw, vis: '\n' });
+        i += raw.length;
+        continue;
+      }
+      units.push({ raw: c, vis: c });
+      i += 1;
+    }
+
+    // <pre> 바로 다음의 줄바꿈 하나는 브라우저가 버린다.
+    if (preLike && units.length && units[0].vis === '\n' && !units[0].hard) units[0].vis = '';
+    if (keep) return units;
+
+    // 줄바꿈이 낀 공백 덩어리: 맨 앞·맨 끝이면 없애고, 가운데면 공백 하나로 본다.
+    const isBlank = (u) => !u.hard && /^\s*$/.test(u.vis);
+    const out = [];
+    let k = 0;
+    while (k < units.length) {
+      if (!isBlank(units[k])) {
+        out.push(units[k]);
+        k += 1;
+        continue;
+      }
+      let e = k;
+      while (e < units.length && isBlank(units[e])) e += 1;
+      const run = units.slice(k, e);
+      if (run.some((u) => u.vis.includes('\n'))) {
+        const edge = out.length === 0 || e === units.length;
+        out.push({ raw: run.map((u) => u.raw).join(''), vis: edge ? '' : ' ' });
+      } else {
+        out.push(...run);
+      }
+      k = e;
+    }
+    return out;
+  }
+
+  // 내용 편집을 원본 안쪽 글자에 반영한다. 바뀐 글자 구간만 고쳐 쓰고 나머지
+  // (들여쓰기·줄바꿈·엔티티 표기)는 원본 그대로 둔다. 바뀐 것이 없으면 null.
+  function editedInner(node, el, info, problems) {
+    const now = readEditableText(el);
+    if (now === info.textBaseline) return null;
+    if (Array.from(el.children).some((c) => c.tagName !== 'BR')) {
+      problems.push(`<${node.name}> 내용 (안쪽 구조가 바뀌어 반영하지 못함)`);
+      return null;
+    }
+    const keep = preservesNewlines(el);
+    const inner = renderModel(node, false).join('');
+    const nl = keep ? source.eol : source.brTag;
+    const serialize = (str) => escapeText(str).split('\n').join(nl);
+    const preLike = PRE_LIKE.has(node.name);
+    const units = textUnits(inner, keep, preLike);
+    const old = units ? units.map((u) => u.vis).join('') : null;
+
+    if (old === null || old !== info.textBaseline) {
+      // 원본 글자가 화면과 달랐다(스크립트가 바꿨던 내용 등). 안쪽 전체를 새로 쓰되
+      // 앞뒤 들여쓰기는 원본 것을 둔다.
+      if (keep) return (preLike ? (inner.match(/^\r?\n/) || [''])[0] : '') + serialize(now);
+      const lead = inner.match(/^[ \t\r\n]*/)[0];
+      const trail = lead.length === inner.length ? '' : inner.match(/[ \t\r\n]*$/)[0];
+      return lead + serialize(now) + trail;
+    }
+
+    // 앞뒤로 같은 글자를 빼고 남은 가운데만 바꾼다.
+    const max = Math.min(old.length, now.length);
+    let pre = 0;
+    while (pre < max && old[pre] === now[pre]) pre += 1;
+    let suf = 0;
+    while (suf < max - pre && old[old.length - 1 - suf] === now[now.length - 1 - suf]) suf += 1;
+
+    let i = 0;
+    let head = 0;
+    while (i < units.length) {
+      const len = units[i].vis.length;
+      if (head + len > pre) break;
+      if (len === 0 && head === pre && head > 0) break;
+      head += len;
+      i += 1;
+    }
+    let j = units.length;
+    let tail = 0;
+    while (j > i && tail + units[j - 1].vis.length <= suf) {
+      tail += units[j - 1].vis.length;
+      j -= 1;
+    }
+    const raw = (list) => list.map((u) => u.raw).join('');
+    return raw(units.slice(0, i)) + serialize(now.slice(head, now.length - tail)) + raw(units.slice(j));
+  }
+
+  // 사진 추가로 넣은 요소(원본에 없음)는 화면의 태그를 그대로 적는다.
+  function serializeNewElement(el) {
+    let out = `<${el.localName}`;
+    Array.from(el.attributes).forEach((a) => {
+      if (a.name === 'data-editor-id' || a.name === SRC_ID_ATTR) return;
+      let v = a.value;
+      if (a.name === 'class') {
+        v = v.split(/\s+/).filter((c) => c && c !== HOVER_CLASS && c !== SELECTED_CLASS).join(' ');
+        if (!v) return;
+      }
+      out += ` ${a.name}="${escapeAttr(unblob(v), '"')}"`;
+    });
+    return `${out}>`;
+  }
+
+  // 반환: { html, problems: 반영하지 못한 수정 목록 }
+  function buildExportHtml() {
+    const problems = [];
+    if (!source) return { html: '', problems };
+    const doc = previewFrame.contentDocument;
+    const live = new Map();
+    if (doc) {
+      doc.querySelectorAll(`[${SRC_ID_ATTR}]`).forEach((el) => {
+        const id = el.getAttribute(SRC_ID_ATTR);
+        if (!live.has(id)) live.set(id, el);
+      });
+    }
+
+    const out = [];
+    const walk = (node) => {
+      node.children.forEach((c) => {
+        if (c.kind === 'text') {
+          out.push(c.text);
+          return;
+        }
+        if (c.kind === 'new') {
+          const el = live.get(c.id);
+          if (el) out.push(serializeNewElement(el));
+          else problems.push('추가한 사진 (화면에서 사라짐)');
+          return;
+        }
+        const info = edits.get(c.id);
+        const el = info ? live.get(c.id) : null;
+        if (!el) {
+          if (info) problems.push(`<${c.name}> 수정 (화면에서 사라진 요소)`);
+          out.push(c.startTag);
+          walk(c);
+          out.push(c.endTag);
+          return;
+        }
+        const changes = attrChanges(c, el, info);
+        out.push(Object.keys(changes).length ? patchStartTag(c, changes) : c.startTag);
+        const inner = info.textBaseline !== undefined ? editedInner(c, el, info, problems) : null;
+        if (inner === null) walk(c);
+        else out.push(inner);
+        out.push(c.endTag);
+      });
+    };
+    walk(source.root);
+    return { html: source.bom + out.join(''), problems };
+  }
+
+  /* --- 저장 전 확인: 원본 대비 바뀐 줄 ------------------------------ */
+
+  // 줄 단위 비교. 반환: [{ t: ' ' | '-' | '+', a: 원본 줄번호, b: 새 줄번호, text }]
+  function lineDiff(before, after) {
+    const A = before.split('\n');
+    const B = after.split('\n');
+    let pre = 0;
+    while (pre < A.length && pre < B.length && A[pre] === B[pre]) pre += 1;
+    let suf = 0;
+    while (suf < A.length - pre && suf < B.length - pre &&
+           A[A.length - 1 - suf] === B[B.length - 1 - suf]) suf += 1;
+
+    const ops = [];
+    let a = 0;
+    let b = 0;
+    const same = (text) => { a += 1; b += 1; ops.push({ t: ' ', a, b, text }); };
+    const del = (text) => { a += 1; ops.push({ t: '-', a, b: null, text }); };
+    const add = (text) => { b += 1; ops.push({ t: '+', a: null, b, text }); };
+
+    A.slice(0, pre).forEach(same);
+    const a1 = A.slice(pre, A.length - suf);
+    const b1 = B.slice(pre, B.length - suf);
+    const n = a1.length;
+    const m = b1.length;
+    if (n && m && n * m <= 4e6) {
+      // 가운데만 최장 공통 부분열(LCS)로 맞춘다. 편집은 보통 몇 군데라 작다.
+      const w = m + 1;
+      const dp = new Uint32Array((n + 1) * w);
+      for (let x = n - 1; x >= 0; x -= 1) {
+        for (let y = m - 1; y >= 0; y -= 1) {
+          dp[x * w + y] = a1[x] === b1[y]
+            ? dp[(x + 1) * w + y + 1] + 1
+            : Math.max(dp[(x + 1) * w + y], dp[x * w + y + 1]);
+        }
+      }
+      let x = 0;
+      let y = 0;
+      while (x < n && y < m) {
+        if (a1[x] === b1[y]) { same(a1[x]); x += 1; y += 1; }
+        else if (dp[(x + 1) * w + y] >= dp[x * w + y + 1]) { del(a1[x]); x += 1; }
+        else { add(b1[y]); y += 1; }
+      }
+      a1.slice(x).forEach(del);
+      b1.slice(y).forEach(add);
+    } else {
+      a1.forEach(del);
+      b1.forEach(add);
+    }
+    A.slice(A.length - suf).forEach(same);
+    return ops;
+  }
+
+  const exportDialog = document.getElementById('export-dialog');
+  const exportSummary = document.getElementById('export-summary');
+  const exportDiff = document.getElementById('export-diff');
+  const exportConfirm = document.getElementById('export-confirm');
+  const exportCancel = document.getElementById('export-cancel');
+  let pendingExportHtml = null;
+
+  const DIFF_CONTEXT = 2;
+  const DIFF_MAX_ROWS = 600;
+
+  function renderDiff(ops) {
+    exportDiff.textContent = '';
+    const changed = ops.map((op) => op.t !== ' ');
+    const show = changed.map((_, k) => {
+      for (let d = -DIFF_CONTEXT; d <= DIFF_CONTEXT; d += 1) if (changed[k + d]) return true;
+      return false;
+    });
+    const frag = document.createDocumentFragment();
+    const row = (cls, text) => {
+      const line = document.createElement('span');
+      line.className = `diff-row ${cls}`;
+      line.textContent = text;
+      frag.appendChild(line);
+    };
+    const num = (v) => (v === null ? '' : String(v)).padStart(5);
+    let rows = 0;
+    let gap = false;
+    for (let k = 0; k < ops.length; k += 1) {
+      if (!show[k]) {
+        gap = true;
+        continue;
+      }
+      if (gap && rows) row('diff-row--gap', '        ⋯');
+      gap = false;
+      if (rows >= DIFF_MAX_ROWS) {
+        row('diff-row--gap', '        (이하 생략)');
+        break;
+      }
+      const op = ops[k];
+      const cls = op.t === '-' ? 'diff-row--del' : op.t === '+' ? 'diff-row--add' : 'diff-row--ctx';
+      row(cls, `${num(op.a)} ${num(op.b)} ${op.t} ${op.text.replace(/\r$/, '')}`);
+      rows += 1;
+    }
+    exportDiff.appendChild(frag);
   }
 
   function exportFileName() {
@@ -3865,12 +4838,38 @@ input:focus-visible {
 
   exportBtn.addEventListener('click', () => {
     const doc = previewFrame.contentDocument;
-    if (!doc || !doc.documentElement) {
+    if (!doc || !doc.documentElement || !source) {
       showToast('내보낼 문서가 없습니다.');
       return;
     }
 
-    const html = buildCleanHtml(doc);
+    const { html, problems } = buildExportHtml();
+    const ops = lineDiff(source.bom + source.text, html);
+    const removed = ops.filter((op) => op.t === '-').length;
+    const added = ops.filter((op) => op.t === '+').length;
+
+    exportSummary.textContent = removed || added
+      ? `원본과 비교해 지운 줄 ${removed}개, 새로 쓴 줄 ${added}개입니다. 의도한 수정만 있는지 확인하세요.`
+      : '원본과 한 글자도 다르지 않습니다. (바뀐 내용 없음)';
+    if (problems.length) {
+      exportSummary.textContent += ` 반영하지 못한 수정: ${problems.slice(0, 3).join(', ')}` +
+        (problems.length > 3 ? ' …' : '');
+    }
+    renderDiff(ops);
+    exportDiff.hidden = !(removed || added);
+    pendingExportHtml = html;
+    exportDialog.showModal();
+    exportConfirm.focus();
+  });
+
+  exportCancel.addEventListener('click', () => exportDialog.close());
+  exportDialog.addEventListener('close', () => { pendingExportHtml = null; });
+
+  exportConfirm.addEventListener('click', () => {
+    const html = pendingExportHtml;
+    exportDialog.close();
+    if (html === null) return;
+    const doc = previewFrame.contentDocument;
     const name = exportFileName();
     const url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
 
@@ -3887,7 +4886,7 @@ input:focus-visible {
       showToast(`내보내기 완료: ${name}. 경로로 바꾸지 못한 임시 주소(blob:)가 남아 있어 일부 사진이 보이지 않을 수 있습니다.`, 8000);
       return;
     }
-    const copies = pendingImageCopies(doc);
+    const copies = doc ? pendingImageCopies(doc) : [];
     if (copies.length) {
       showToast(`내보내기 완료: ${name}. 새 사진 ${copies.length}개를 HTML 기준 다음 위치에 복사하세요: ` +
         copies.slice(0, 3).join(', ') + (copies.length > 3 ? ' …' : ''), 10000);
@@ -3896,8 +4895,10 @@ input:focus-visible {
     showToast(`내보내기 완료: ${name}`);
   });
 
-  // 검증용으로 직렬화 결과만 얻을 수 있게 노출
-  window.FrontEndEditor.buildCleanHtml = () => buildCleanHtml(previewFrame.contentDocument);
+  // 검증용: 다운로드 없이 저장될 문자열과 원본을 얻는다.
+  window.FrontEndEditor.buildExportHtml = () => buildExportHtml().html;
+  window.FrontEndEditor.buildCleanHtml = window.FrontEndEditor.buildExportHtml;
+  window.FrontEndEditor.getSourceText = () => (source ? source.bom + source.text : null);
 })();
 </script>
 </body>
